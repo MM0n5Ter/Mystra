@@ -1,0 +1,7 @@
+# Python dependencies for the Mystra rule compiler (mystra-compiler.py).
+# The compiler loads the generated tsl_parser.so via the tree-sitter runtime.
+#
+# Regenerating the parser (tree-sitter generate/build) additionally needs the
+# Node CLI `tree-sitter-cli` (see package.json devDependencies), which is
+# installed via npm, not pip.
+tree-sitter>=0.24,<0.26

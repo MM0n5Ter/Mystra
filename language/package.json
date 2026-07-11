@@ -1,0 +1,20 @@
+{
+  "name": "tree-sitter-mystra",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Mystra",
+  "main": "bindings/node",
+  "keywords": [
+    "tree-sitter",
+    "parser",
+    "tsl",
+    "taint"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.0"
+  }
+}

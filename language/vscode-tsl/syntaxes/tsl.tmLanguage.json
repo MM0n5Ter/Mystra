@@ -1,0 +1,164 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "TSL",
+  "scopeName": "source.tsl",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#annotation" },
+    { "include": "#var-decl" },
+    { "include": "#rule" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.tsl"
+    },
+    "var-decl": {
+      "match": "\\b(let)\\s+([a-zA-Z_]\\w*)(?:\\[([a-zA-Z_]\\w*)\\](?:\\[([a-zA-Z_]\\w*)\\])?)?\\s*(->)\\s*([a-zA-Z_]\\w*)\\s*;",
+      "captures": {
+        "1": { "name": "keyword.control.let.tsl" },
+        "2": { "name": "variable.other.var-name.tsl" },
+        "3": { "name": "storage.type.tsl" },
+        "4": { "name": "storage.type.tsl" },
+        "5": { "name": "keyword.operator.tsl" },
+        "6": { "name": "storage.type.tsl" }
+      }
+    },
+    "rule": {
+      "begin": "\\b(rule)\\b",
+      "end": "(?=\\b(?:rule|let)\\b)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.rule.tsl" }
+      },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#annotation" },
+        { "include": "#func-sig" },
+        { "include": "#param-list" },
+        { "include": "#sub-rule" }
+      ]
+    },
+    "annotation": {
+      "match": "(@engine)\\s*\\(\\s*(\\w+)\\s*\\)",
+      "captures": {
+        "1": { "name": "keyword.other.annotation.tsl" },
+        "2": { "name": "string.unquoted.engine.tsl" }
+      }
+    },
+    "func-sig": {
+      "match": "(?<=rule\\s)\\s*([a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*|\\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?=\\s*[:(])",
+      "captures": {
+        "1": { "name": "entity.name.function.tsl" }
+      }
+    },
+    "param-list": {
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": { "0": { "name": "punctuation.paren.open.tsl" } },
+      "endCaptures": { "0": { "name": "punctuation.paren.close.tsl" } },
+      "patterns": [
+        {
+          "match": "(\\.\\.\\.)([a-zA-Z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.operator.spread.tsl" },
+            "2": { "name": "variable.parameter.tsl" }
+          }
+        },
+        {
+          "match": "\\b([a-zA-Z_]\\w*)\\b",
+          "name": "variable.parameter.tsl"
+        }
+      ]
+    },
+    "sub-rule": {
+      "patterns": [
+        { "include": "#action-keyword" },
+        { "include": "#magic-name" },
+        { "include": "#guard" },
+        { "include": "#callback-ref" },
+        { "include": "#alert-anno" },
+        { "include": "#operator" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#wildcard" },
+        { "include": "#identifier" }
+      ]
+    },
+    "action-keyword": {
+      "match": "\\b(propagate|forward|inject|extract|sink|collapse|source|clear|preserve|set)\\b",
+      "name": "keyword.operator.action.tsl"
+    },
+    "guard": {
+      "patterns": [
+        {
+          "match": "\\b(where|and|or|not|in|matches)\\b",
+          "name": "keyword.control.guard.tsl"
+        },
+        {
+          "match": "\\b(true|false|null)\\b",
+          "name": "constant.language.tsl"
+        }
+      ]
+    },
+    "magic-name": {
+      "match": "@(self|ret|args|argc|is_new|cwe|engine|callback\\.param|callback\\.ret)\\b",
+      "name": "variable.language.magic.tsl"
+    },
+    "callback-ref": {
+      "patterns": [
+        {
+          "match": "\\b(\\w+)(\\.param)\\[",
+          "captures": {
+            "1": { "name": "variable.parameter.tsl" },
+            "2": { "name": "keyword.other.callback.tsl" }
+          }
+        },
+        {
+          "match": "\\b(\\w+)(\\.ret)\\b",
+          "captures": {
+            "1": { "name": "variable.parameter.tsl" },
+            "2": { "name": "keyword.other.callback.tsl" }
+          }
+        },
+        {
+          "match": "\\b(\\w+)\\.(isCallback|isPrototype|tainted|isnull|type|value|taint|ref|is_proto)\\b",
+          "captures": {
+            "1": { "name": "variable.parameter.tsl" },
+            "2": { "name": "support.function.magic-prop.tsl" }
+          }
+        }
+      ]
+    },
+    "alert-anno": {
+      "match": "(@cwe)\\s*\\(\\s*(\\d+)\\s*\\)",
+      "captures": {
+        "1": { "name": "variable.language.magic.tsl" },
+        "2": { "name": "constant.numeric.cwe.tsl" }
+      }
+    },
+    "operator": {
+      "match": "->|==|!=|>=|<=|>|<|=|:",
+      "name": "keyword.operator.tsl"
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.tsl",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.tsl" }
+      ]
+    },
+    "number": {
+      "match": "-?\\b[0-9]+\\b",
+      "name": "constant.numeric.tsl"
+    },
+    "wildcard": {
+      "match": "\\*\\*|\\*",
+      "name": "keyword.operator.wildcard.tsl"
+    },
+    "identifier": {
+      "match": "\\b[a-zA-Z_]\\w*\\b",
+      "name": "variable.other.tsl"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "tsl-language",
+  "displayName": "TSL — Taint Specification Language",
+  "description": "Syntax highlighting for TSL (.tsl) taint rule files",
+  "version": "0.1.0",
+  "publisher": "dta-engine",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "tsl",
+      "aliases": ["TSL", "Taint Specification Language"],
+      "extensions": [".tsl"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "tsl",
+      "scopeName": "source.tsl",
+      "path": "./syntaxes/tsl.tmLanguage.json"
+    }]
+  }
+}

@@ -1,0 +1,646 @@
+# ============================================================
+# v8-rules.tsl — V8/Node.js Taint Rule Set
+#
+# Compiled by language/mystra-compiler.py → v8-rules.tbin
+# Syntax:  Mystra v3 (keyword-based actions)
+#
+# ARG INDEXING CONVENTION:
+#   @self     = receiver (this)
+#   @args[0]  = first user-visible argument (NOT self)
+#   @args[1]  = second user-visible argument
+#   @args[N:] = range from Nth user arg to end (exclusive of self)
+#
+#   In the physical arg mapping (rt_idx), slot 0 is always the
+#   receiver. @args[N] maps to rt_idx = N + 1.
+#   A function with 1 user arg has argc=2 (receiver + arg).
+#   @args[1:] on a 1-arg function is EMPTY — use @args[0:].
+# ============================================================
+
+
+# ============================================================
+# String — Propagate (self -> ret, derived taint)
+# ============================================================
+
+rule V8_native::StringPrototypeCharAt:              propagate @self -> @ret
+rule V8_native::StringPrototypeCharCodeAt:          propagate @self -> @ret
+rule V8_native::StringPrototypeCodePointAt:         propagate @self -> @ret
+rule V8_native::StringPrototypeAt:                  propagate @self -> @ret
+rule V8_native::StringPrototypeSlice:               propagate @self -> @ret
+rule V8_native::StringPrototypeSubstring:           propagate @self -> @ret
+rule V8_native::StringPrototypeSubstr:              propagate @self -> @ret
+rule V8_native::StringPrototypeRepeat:              propagate @self -> @ret
+
+# HTML wrapper methods (legacy, all propagate self -> ret)
+rule V8_native::StringPrototypeBold:                propagate @self -> @ret
+rule V8_native::StringPrototypeBig:                 propagate @self -> @ret
+rule V8_native::StringPrototypeBlink:               propagate @self -> @ret
+rule V8_native::StringPrototypeFixed:               propagate @self -> @ret
+rule V8_native::StringPrototypeItalics:             propagate @self -> @ret
+rule V8_native::StringPrototypeSmall:               propagate @self -> @ret
+rule V8_native::StringPrototypeStrike:              propagate @self -> @ret
+rule V8_native::StringPrototypeSub:                 propagate @self -> @ret
+rule V8_native::StringPrototypeSup:                 propagate @self -> @ret
+
+# HTML wrapper methods with argument (propagate self + arg[0] -> ret)
+rule V8_native::StringPrototypeAnchor(name):        propagate @self, name -> @ret
+rule V8_native::StringPrototypeFontcolor(color):    propagate @self, color -> @ret
+rule V8_native::StringPrototypeFontsize(size):      propagate @self, size -> @ret
+rule V8_native::StringPrototypeLink(url):           propagate @self, url -> @ret
+
+
+# ============================================================
+# String — Forward (self -> ret, same taint ID)
+# ============================================================
+
+rule V8_native::StringPrototypeTrim:                forward @self -> @ret
+rule V8_native::StringPrototypeTrimStart:           forward @self -> @ret
+rule V8_native::StringPrototypeTrimEnd:             forward @self -> @ret
+rule V8_native::StringPrototypeToLowerCaseIntl:     forward @self -> @ret
+rule V8_native::StringPrototypeToUpperCaseIntl:     forward @self -> @ret
+rule V8_native::StringPrototypeToLocaleLowerCase:   forward @self -> @ret
+rule V8_native::StringPrototypeToLocaleUpperCase:   forward @self -> @ret
+rule V8_native::StringPrototypeNormalizeIntl:       forward @self -> @ret
+rule V8_native::StringPrototypeToWellFormed:        forward @self -> @ret
+rule V8_native::StringPrototypeToString:            forward @self -> @ret
+rule V8_native::StringPrototypeValueOf:             forward @self -> @ret
+
+
+# ============================================================
+# String — Clear (comparison/search ops produce no taint)
+# ============================================================
+
+rule V8_native::StringPrototypeIndexOf:             clear
+rule V8_native::StringPrototypeLastIndexOf:         clear
+rule V8_native::StringPrototypeSearch:              clear
+rule V8_native::StringPrototypeStartsWith:          clear
+rule V8_native::StringPrototypeEndsWith:            clear
+rule V8_native::StringPrototypeIncludes:            clear
+rule V8_native::StringPrototypeIsWellFormed:        clear
+rule V8_native::StringPrototypeLocaleCompareIntl:   clear
+
+
+# ============================================================
+# String — Multi-source Propagate
+# ============================================================
+
+rule V8_native::StringPrototypeConcat(...parts):    propagate @self, parts -> @ret
+rule V8_native::StringPrototypeReplace(pattern, replacement):
+    propagate @self, replacement -> @ret where not replacement.isCallback
+    inject @self -> replacement.param[0] where replacement.isCallback
+    extract replacement.ret -> @ret where replacement.isCallback
+    propagate @self -> @ret where replacement.isCallback
+rule V8_native::StringPrototypeReplaceAll(pattern, replacement):
+    propagate @self, replacement -> @ret where not replacement.isCallback
+    inject @self -> replacement.param[0] where replacement.isCallback
+    extract replacement.ret -> @ret where replacement.isCallback
+    propagate @self -> @ret where replacement.isCallback
+rule V8_native::StringPrototypePadStart(length, fill):
+    propagate @self, fill -> @ret
+rule V8_native::StringPrototypePadEnd(length, fill):
+    propagate @self, fill -> @ret
+
+
+# ============================================================
+# String — Container output
+# ============================================================
+
+rule V8_native::StringPrototypeSplit(sep):          propagate @self, sep -> @ret[*]
+rule V8_native::StringPrototypeMatchAll:            propagate @self -> @ret[*]
+rule V8_native::StringPrototypeIterator:            propagate @self -> @ret[*]
+
+# Multi-subrule: match produces both array elements and .input property
+rule V8_native::StringPrototypeMatch:
+    propagate @self -> @ret[*]
+    propagate @self -> @ret.input
+
+
+# ============================================================
+# String — Static constructors
+# ============================================================
+
+# Call vs Construct: String(x) returns primitive, new String(x) wraps in object
+rule V8_native::StringConstructor(value):
+    propagate value -> @ret where not @is_new
+    propagate value -> @ret.* where @is_new
+
+rule V8_native::StringFromCharCode(...codes):       propagate codes -> @ret
+rule V8_native::StringFromCodePoint(...codes):      propagate codes -> @ret
+rule V8_native::StringRaw(template, ...subs):       propagate template[*], subs -> @ret
+
+
+# ============================================================
+# Array — Container propagation
+# ============================================================
+
+rule V8_native::ArrayPrototypeMap(callback, thisArg):
+    inject @self[*] -> callback.param[0]
+    extract callback.ret -> @ret[*]
+rule V8_native::ArrayPrototypeFilter:
+    inject @self[*] -> @callback.param[0]
+    propagate @self[*] -> @ret[*]
+rule V8_native::ArrayPrototypeFlat:                 propagate @self[*] -> @ret[*]
+rule V8_native::ArrayPrototypeSlice:                propagate @self[*], @self.* -> @ret[*]
+
+# Aliases (V8 internal names for some builtins)
+rule V8_native::ArrayMap(callback, thisArg):
+    inject @self[*] -> callback.param[0]
+    extract callback.ret -> @ret[*]
+rule V8_native::ArrayFilter:
+    inject @self[*] -> @callback.param[0]
+    propagate @self[*] -> @ret[*]
+rule V8_native::ArrayConcat:                        propagate @self[*], @args[0:][*], @args[0:] -> @ret[*]
+
+rule V8_native::ArrayPrototypeConcat(...items):     propagate @self[*], items[*], items -> @ret[*]
+rule V8_native::ArrayPrototypePush(...items):       propagate items -> @self[*]
+rule V8_native::ArrayPrototypePop:                  propagate @self[*] -> @ret
+rule V8_native::ArrayPrototypeShift:                propagate @self[*] -> @ret
+rule V8_native::ArrayPrototypeAt(index):            propagate @self[*] -> @ret
+rule V8_native::ArrayPrototypeJoin(sep):            collapse @self[*], sep -> @ret
+rule V8_native::ArrayFrom(iterable, mapFn):
+    propagate iterable[*] -> @ret[*]
+    inject iterable[*] -> mapFn.param[0] where mapFn.isCallback
+    extract mapFn.ret -> @ret[*] where mapFn.isCallback
+rule V8_native::ArrayIteratorPrototypeNext:         propagate @self -> @ret
+
+# Generator yield: bridge taint from generator's saved acc to IterResultObject.
+# SuspendGenerator saves shadow_acc to generator via DTA_GENERATOR_ACC_KEY.
+# CollectAllHeapTaints(@self) finds it. @ret[*] sets wildcard on IterResultObject.
+rule V8_native::GeneratorPrototypeNext:             propagate @self[*] -> @ret[*]
+rule V8_native::AsyncGeneratorPrototypeNext:        propagate @self[*] -> @ret[*]
+
+
+# ============================================================
+# HOF — Higher-Order Function callback taint bridging
+# ============================================================
+
+# HOF rules: dual names needed — V8 Torque uses "ArrayForEach",
+# but JS-visible name is "ArrayPrototypeForEach". Both must have rules.
+rule V8_native::ArrayPrototypeForEach:
+    inject @self[*] -> @callback.param[0]
+rule V8_native::ArrayForEach:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::ArrayPrototypeSome:
+    inject @self[*] -> @callback.param[0]
+rule V8_native::ArraySome:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::ArrayPrototypeEvery:
+    inject @self[*] -> @callback.param[0]
+rule V8_native::ArrayEvery:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::ArrayPrototypeFind:
+    inject @self[*] -> @callback.param[0]
+    propagate @self[*] -> @ret
+rule V8_native::ArrayFind:
+    inject @self[*] -> @callback.param[0]
+    propagate @self[*] -> @ret
+
+rule V8_native::ArrayPrototypeFindIndex:
+    inject @self[*] -> @callback.param[0]
+rule V8_native::ArrayFindIndex:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::ArrayPrototypeFindLast:
+    inject @self[*] -> @callback.param[0]
+    propagate @self[*] -> @ret
+
+rule V8_native::ArrayPrototypeFindLastIndex:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::ArrayPrototypeReduce(callback, initialValue):
+    inject @self[*] -> callback.param[1]
+    extract callback.ret -> @ret
+rule V8_native::ArrayReduce(callback, initialValue):
+    inject @self[*] -> callback.param[1]
+    extract callback.ret -> @ret
+
+rule V8_native::ArrayPrototypeReduceRight:
+    inject @self[*] -> @callback.param[1]
+    extract @callback.ret -> @ret
+rule V8_native::ArrayReduceRight:
+    inject @self[*] -> @callback.param[1]
+    extract @callback.ret -> @ret
+
+rule V8_native::ArrayPrototypeFlatMap:
+    inject @self[*] -> @callback.param[0]
+    extract @callback.ret -> @ret[*]
+
+rule V8_native::ArrayPrototypeSort:
+    inject @self[*] -> @callback.param[0]
+    inject @self[*] -> @callback.param[1]
+    propagate @self[*] -> @ret[*]
+
+rule V8_native::MapPrototypeForEach:
+    inject @self[*] -> @callback.param[0]
+
+rule V8_native::SetPrototypeForEach:
+    inject @self[*] -> @callback.param[0]
+
+
+# ============================================================
+# Promise — Async taint propagation
+# ============================================================
+
+rule V8_native::PromiseResolveTrampoline(value):    propagate value -> @ret[*]
+rule V8_native::PromisePrototypeThen(onFulfilled, onRejected):
+    forward @self[*] -> @ret[*]
+    inject @self[*] -> onFulfilled.param[0]
+    extract onFulfilled.ret -> @ret[*]
+    inject @self -> onRejected.param[0]
+    extract onRejected.ret -> @ret[*]
+
+
+# ============================================================
+# RegExp — Pattern matching
+# ============================================================
+
+rule V8_native::RegExpPrototypeExec(input):
+    propagate input -> @ret[*]
+    propagate input -> @ret.input
+
+rule V8_native::RegExpPrototypeReplace(input, replacement):
+    propagate input, replacement, @self -> @ret
+
+
+# ============================================================
+# JSON — Serialization bridge
+# ============================================================
+
+rule V8_native::JsonStringify(value):
+    collapse value, value[*] -> @ret
+
+rule V8_native::JsonParse(text):
+    propagate text -> @ret, @ret[**], @ret.**
+
+
+# ============================================================
+# URI — Forward encoding/decoding
+# ============================================================
+
+rule V8_native::GlobalDecodeURIComponent(uri):      forward uri -> @ret
+rule V8_native::GlobalDecodeURI(uri):               forward uri -> @ret
+rule V8_native::GlobalEncodeURIComponent(uri):      forward uri -> @ret
+rule V8_native::GlobalEncodeURI(uri):               forward uri -> @ret
+
+
+# ============================================================
+# LoadIC — Generic property load (internal V8 mechanism)
+# ============================================================
+
+rule V8_native::LoadIC_Noninlined:                  propagate @args[0:], @args[0:][*], @args[0:].* -> @ret
+rule V8_native::LoadICTrampoline:                   propagate @args[0:], @args[0:][*], @args[0:].* -> @ret
+
+
+# ============================================================
+# TypedArray / Buffer — Binary data taint chain
+# ============================================================
+
+# Shared by Uint8Array, Int32Array, etc.
+# Semantic bridge for Buffer.from chain: propagates arg taint to constructed object
+rule V8_native::TypedArrayConstructor:              propagate @args[0:] -> @ret
+rule V8_native::TypedArrayPrototypeSet(source):     propagate source -> @self
+rule V8_native::TypedArrayPrototypeSlice:           propagate @self -> @ret
+rule V8_native::TypedArrayPrototypeSubArray:        propagate @self -> @ret
+rule V8_native::TypedArrayPrototypeBuffer:          propagate @self -> @ret
+
+
+# ============================================================
+# Object — Property manipulation (Mystra EXTENSION: kDynamicKey)
+# ============================================================
+
+# THE key motivation for kDynamicKey: runtime property extraction + dynamic key
+# sink re-enabled after A7 fix (letiable-input DtaCallPreHook, GC-safe args)
+rule V8_native::ObjectDefineProperty(target, key, desc):
+    propagate desc.value -> target[key]
+    sink desc @cwe(1321) where target.isPrototype
+
+# Rest parameter + PropertyWildcard: copy all named properties
+rule V8_native::ObjectAssign(target, ...sources):
+    propagate sources.* -> target.*
+
+
+# ============================================================
+# Buffer Host APIs — Slice / Copy / Fill
+# ============================================================
+
+rule V8_hostapi::buffer.utf8Slice(buf):              propagate buf[*] -> @ret
+rule V8_hostapi::buffer.hexSlice(buf):               propagate buf[*] -> @ret
+rule V8_hostapi::buffer.asciiSlice(buf):             propagate buf[*] -> @ret
+rule V8_hostapi::buffer.latin1Slice(buf):            propagate buf[*] -> @ret
+rule V8_hostapi::buffer.ucs2Slice(buf):              propagate buf[*] -> @ret
+rule V8_hostapi::buffer.base64Slice(buf):            propagate buf -> @ret
+rule V8_hostapi::buffer.copy(source, target):
+    propagate source[*] -> target[*]
+    propagate source -> target
+rule V8_hostapi::buffer.fill(buf, value):            propagate value -> buf
+rule V8_hostapi::buffer.isUtf8:                      clear
+rule V8_hostapi::writeBuffer:                        propagate @args[0:] -> @self, @ret
+
+# utf8WriteStatic: mapping[0]=recv(null), mapping[1]=bufPtr, mapping[2]=string
+# arg[N] = mapping[N+1], so arg[1]=string, arg[0]=bufPtr
+# ret = Smi byte count (semantic bridge for Buffer.from chain)
+rule V8_hostapi::buffer.utf8WriteStatic(buf, str):   propagate str -> buf[*], @ret
+# base64Write: same pattern — string decoded into buffer
+rule V8_hostapi::buffer.base64Write(buf, str):       propagate str -> buf[*], @ret
+# atob: base64 decode (globalThis.atob), used by cookie libraries
+rule V8_hostapi::buffer.atob(str):                    propagate str -> @ret
+
+# URL C++ parser: propagate taint from input to href output
+rule V8_hostapi::parse:                              propagate @args[0:] -> @ret
+
+
+# ============================================================
+# Security Sinks — CWE-94: Code Injection
+# ============================================================
+
+rule V8_native::GlobalEval(code):                   sink code @cwe(94)
+rule V8_native::FunctionConstructor(...parts):      sink parts @cwe(94)
+rule V8_runtime::ResolvePossiblyDirectEval:  sink @args[0:] @cwe(94)
+rule V8_hostapi::compileFunction:                    sink @args[0:] @cwe(94)
+rule V8_hostapi::compileFunctionForCJSLoader:        sink @args[0:] @cwe(94)
+rule V8_hostapi::ContextifyScript:                   sink @args[0:] @cwe(94)
+# vm.SourceTextModule(code) -> new ModuleWrap(url, context, source, ...).
+# arg[2] is the ESM source text. Matches CodeQL VmModuleMemberInvocation
+# getACodeArgument() for "SourceTextModule". (Synthetic modules pass an array
+# of export names as arg[2]; tainted export names would FP, but that is rare.)
+rule V8_hostapi::ModuleWrap(url, context, source):   sink source @cwe(94)
+
+
+# ============================================================
+# Security Sinks — CWE-78: OS Command Injection
+# ============================================================
+
+rule V8_hostapi::spawn_sync.spawn(file, args):    sink file, args @cwe(78)
+rule V8_hostapi::spawn(file, args):               sink file, args @cwe(78)
+
+
+# ============================================================
+# Var Store — I/O Boundary Taint Bridging
+# ============================================================
+# Tracks taint across API boundaries where data leaves and re-enters V8.
+# set records taint on the write side, propagate reads on the read side.
+# Pattern: sender API → set x = taint, receiver API → propagate x → @ret
+
+let io_taint[ref] -> taint ;
+
+
+# ============================================================
+# Security Sinks — CWE-22: Path Traversal (fs module)
+# ============================================================
+
+rule V8_hostapi::open(path):
+    sink path @cwe(22)
+    # Buffer-path file-read bridge: taint the returned fd with the file's
+    # io_taint (set by writeFileUtf8) so binding.read(fd, buffer) can carry it
+    # into the destination buffer. Mirrors readFileUtf8's string-path bridge.
+    propagate io_taint[path.ref] -> @ret
+rule V8_hostapi::openFileHandle(req, path):           sink path @cwe(22)
+rule V8_hostapi::readdir(path):                      sink path @cwe(22)
+rule V8_hostapi::unlink(path):                       sink path @cwe(22)
+rule V8_hostapi::mkdir(path):                        sink path @cwe(22)
+rule V8_hostapi::rename(oldpath, newpath):           sink oldpath, newpath @cwe(22)
+rule V8_hostapi::copyFile(src, dest):                sink src, dest @cwe(22)
+rule V8_hostapi::link(src, dest):                    sink src, dest @cwe(22)
+rule V8_hostapi::symlink(target, linkpath):          sink target, linkpath @cwe(22)
+rule V8_hostapi::chmod(path):                        sink path @cwe(22)
+rule V8_hostapi::access(path):                       sink path @cwe(22)
+rule V8_hostapi::stat(path):                         sink path @cwe(22)
+rule V8_hostapi::writeFileUtf8(path, data):
+    set io_taint[path.ref] = data.taint
+rule V8_hostapi::existsSync(path):                   sink path @cwe(22)
+
+
+# ============================================================
+# Security Sinks — CWE-89: SQL Injection
+# ============================================================
+
+rule V8_hostapi::node_sqlite3.Statement(db, sql):    sink sql @cwe(89)
+
+
+# ============================================================
+# Security Sinks — CWE-918: SSRF (TCP reachability)
+# ============================================================
+
+rule V8_hostapi::connect:                            sink @args[0:] @cwe(918)
+
+
+# ============================================================
+# Threat-Model / Remote-Flow Sources (DECLARATIVE)
+# ============================================================
+# Expressiveness parity with CodeQL's hardcoded RemoteFlowSource and
+# ThreatModelSource classes in NodeJSLib.qll / NodeJSLib.model.yml.
+#
+# RUNTIME NOTE: the dynamic engine injects taint at the harness boundary
+# (%SetTaint / instrumented entry points), so these rules are INERT at
+# runtime — their qualified host-API signatures do not match the names the
+# classifier emits for these JS-level framework calls. They exist to show
+# the Mystra language CAN declare the same source surface CodeQL hardcodes.
+# Target is the canonical @ret ("the value produced here is attacker-
+# controlled"); callback-parameter precision (req/res/chunk/line), which
+# CodeQL expresses via Argument[k].Parameter[n], is not modeled because
+# source's sink_list cannot address a callback parameter.
+
+# process.env — environment threat-model source (ProcessEnvThreatSource)
+rule V8_hostapi::process.env:                        source -> @ret
+# process.stdin — stdin source: read() ReturnValue + on('data') chunk
+rule V8_hostapi::process.stdin:                      source -> @ret
+# readline.createInterface — question()/on('line') answer (stdin)
+rule V8_hostapi::readline.createInterface:           source -> @ret
+# net/tls server connection data — remote user input
+rule V8_hostapi::net.createServer:                   source -> @ret
+rule V8_hostapi::tls.createServer:                   source -> @ret
+# http/https/http2 server request handler — remote request input
+rule V8_hostapi::http.createServer:                  source -> @ret
+rule V8_hostapi::https.createServer:                 source -> @ret
+rule V8_hostapi::http2.createServer:                 source -> @ret
+rule V8_hostapi::http2.createSecureServer:           source -> @ret
+# http/https client request response/data event — remote response input
+rule V8_hostapi::http.request:                       source -> @ret
+rule V8_hostapi::https.request:                      source -> @ret
+# events.EventEmitter — generic event payload (CodeQL NodeJSEventEmitter)
+rule V8_hostapi::events.EventEmitter:                source -> @ret
+
+
+# ============================================================
+# Security Sinks — CWE-1321: Prototype Pollution (bytecode-level)
+# ============================================================
+
+# Rule-driven detection: compiled guards evaluate at property store time.
+# Delete this rule = detection OFF. Modify guards = change oracle.
+#
+# StaKeyedProperty: primary vector (deep merge, dynamic key iteration)
+#   Case 1: tainted value written to prototype (deep merge endpoint)
+#   Case 2: tainted key on prototype (attacker controls property name)
+#   Case 3: __proto__ key with tainted value (explicit proto traversal)
+rule V8_bytecode::StaKeyedProperty(target, key, value):
+    sink value @cwe(1321) where target.isPrototype
+    sink key @cwe(1321) where target.isPrototype
+    sink value @cwe(1321) where key.value == "__proto__"
+
+# StaNamedProperty: secondary vector (static obj.__proto__ = value)
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(1321) where target.isPrototype
+
+# StaNamedProperty: DOM XSS sinks (element.innerHTML = tainted)
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(79) where name.value == "innerHTML"
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(79) where name.value == "outerHTML"
+
+# StaNamedProperty: Open redirect (location.href = tainted)
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(601) where name.value == "href"
+
+# StaNamedProperty: DOM XSS via src attribute (script.src, iframe.src)
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(79) where name.value == "src"
+
+# StaNamedProperty: DOM XSS via srcdoc (iframe.srcdoc = tainted)
+rule V8_bytecode::StaNamedProperty(target, name, value):
+    sink value @cwe(79) where name.value == "srcdoc"
+
+# StaNamedProperty: DOM XSS via textContent (less dangerous but trackable)
+# rule V8_bytecode::StaNamedProperty(target, name, value):
+#     sink value @cwe(79) where name.value == "textContent"
+# ;
+# NOTE: textContent is usually safe (auto-escapes HTML). Commented out to avoid FP.
+
+
+# File I/O boundary
+rule V8_hostapi::readFileUtf8(path):
+    propagate io_taint[path.ref] -> @ret
+
+# Buffer-path read: fs.readFileSync(path) without encoding opens the file then
+# reads into a Buffer via binding.read(fd, buffer, ...). The fd carries the
+# file's taint (from the open rule above); scatter it into the buffer so a
+# subsequent buffer.toString()/utf8Slice surfaces it.
+rule V8_hostapi::read(fd, buffer, offset, length, position):
+    propagate fd -> buffer[*]
+
+# Vectored read: fs.readv(fd, buffers[], position, cb) fills an ARRAY of Buffers
+# from the file. The fd carries the file's taint (from the open rule); scatter it
+# into every element of every buffer so buf.toString()/utf8Slice surfaces it.
+# Mirrors `read` above but one wildcard deeper (array-of-buffers). Models
+# CodeQL NodeJSFileSystemAccessVectorRead.getADataNode() = arg(1) + its elements.
+rule V8_hostapi::readBuffers(fd, buffers):
+    propagate fd -> buffers[**]
+    propagate io_taint[fd.ref] -> buffers[**]
+
+# Vectored write: fs.writev(fd, buffers[], position, cb) writes an ARRAY of
+# Buffers to the file. Key the file taint on the fd so a same-fd readv recovers
+# it. Mirrors writeFileUtf8's path-keyed set. Models CodeQL
+# NodeJSFileSystemVectorWrite.getADataNode() = arg(1).
+rule V8_hostapi::writeBuffers(fd, buffers):
+    set io_taint[fd.ref] = buffers.taint
+
+# postMessage boundary — taint bridges Blink's MessagePort serialization
+let msg_taint -> taint ;
+
+rule V8_hostapi::Window.postMessage(msg, origin):
+    set msg_taint = msg.taint
+
+# MessageEvent.data is a property getter — taint flows back when accessed
+# Blink returns the deserialized value via get_data; we bridge from let store
+rule V8_hostapi::MessageEvent.get_data:
+    propagate msg_taint -> @ret
+
+
+# ============================================================
+# Runtime Infrastructure — Preserve (NOP, protect accumulator)
+# ============================================================
+
+rule V8_runtime::SetTaint:                   preserve
+rule V8_runtime::GetTaint:                   preserve
+rule V8_runtime::TaintBinaryOpStub:          preserve
+rule V8_runtime::DtaSetNamedPropertyTaint:   preserve
+rule V8_runtime::DtaApplyCallRuleTaint:      preserve
+rule V8_runtime::DtaMaglevCallPreHook:       preserve
+rule V8_runtime::DtaBindResultTaint:         preserve
+rule V8_runtime::DtaPropagateBinaryOp:       preserve
+
+
+# ============================================================
+# DOM / Blink API — Sink Rules (CWE-79 XSS, CWE-601 Redirect)
+# ============================================================
+#
+# Blink registers DOM API callbacks via FunctionTemplate::SetClassName().
+# V8 sees: "set innerHTML", "write", "setAttribute", etc.
+# These appear as host API functions (V8_hostapi:: namespace) in our classifier.
+# The names below match sfi->DebugNameCStr() output from Blink bindings.
+#
+# NOTE: These names are tentative — verify with --dta-disable-skipbit
+# logging after first Chromium run to see actual function names.
+# ============================================================
+
+# --- CWE-79: XSS Sinks ---
+# Names use InterfaceName.func_name format (Blink SetInterfaceName + SetClassName)
+# Spaces in Blink names are replaced with underscores by the classifier.
+
+# Element.innerHTML / outerHTML setters
+rule V8_hostapi::Element.set_innerHTML:       sink @args[0:] @cwe(79)
+rule V8_hostapi::Element.set_outerHTML:       sink @args[0:] @cwe(79)
+
+# document.write / document.writeln
+rule V8_hostapi::Document.write:              sink @args[0:] @cwe(79)
+rule V8_hostapi::Document.writeln:            sink @args[0:] @cwe(79)
+
+# Element.setAttribute — event handler injection (onclick, onerror, etc.)
+rule V8_hostapi::Element.setAttribute:        sink @args[0:] @cwe(79)
+rule V8_hostapi::Element.setAttributeNS:      sink @args[0:] @cwe(79)
+
+# Element.insertAdjacentHTML
+rule V8_hostapi::Element.insertAdjacentHTML:  sink @args[0:] @cwe(79)
+
+# --- CWE-94: Code Injection via DOM APIs ---
+
+# setTimeout/setInterval with string argument (code execution)
+# Blink may register under Window, DOMWindow, or bare name
+rule V8_hostapi::Window.setTimeout:           sink @args[0:] @cwe(94)
+rule V8_hostapi::Window.setInterval:          sink @args[0:] @cwe(94)
+rule V8_hostapi::DOMWindow.setTimeout:        sink @args[0:] @cwe(94)
+rule V8_hostapi::DOMWindow.setInterval:       sink @args[0:] @cwe(94)
+rule V8_hostapi::setTimeout:                  sink @args[0:] @cwe(94)
+rule V8_hostapi::setInterval:                 sink @args[0:] @cwe(94)
+
+# --- CWE-601: Open Redirect ---
+
+# location.href setter / assign / replace
+rule V8_hostapi::Location.set_href:           sink @args[0:] @cwe(601)
+rule V8_hostapi::Location.assign:             sink @args[0:] @cwe(601)
+rule V8_hostapi::Location.replace:            sink @args[0:] @cwe(601)
+# Bare name fallback
+rule V8_hostapi::assign:                      sink @args[0:] @cwe(601)
+
+# window.open
+rule V8_hostapi::Window.open:                 sink @args[0:] @cwe(601)
+rule V8_hostapi::DOMWindow.open:              sink @args[0:] @cwe(601)
+
+# document.write bare name fallback
+rule V8_hostapi::write:                       sink @args[0:] @cwe(79)
+rule V8_hostapi::writeln:                     sink @args[0:] @cwe(79)
+
+# setAttribute bare name fallback
+rule V8_hostapi::setAttribute:               sink @args[0:] @cwe(79)
+
+# --- DOM Propagation Rules ---
+
+# Element property getters
+rule V8_hostapi::Element.get_innerHTML:       propagate @self -> @ret
+rule V8_hostapi::Element.get_textContent:     propagate @self -> @ret
+
+# HTMLInputElement.value getter (form inputs)
+rule V8_hostapi::HTMLInputElement.get_value:  propagate @self -> @ret
+
+# Location property getters (taint sources from URL)
+rule V8_hostapi::Location.get_href:           propagate @self -> @ret
+rule V8_hostapi::Location.get_search:         propagate @self -> @ret
+
+# Document property getters (taint sources)
+rule V8_hostapi::Document.get_cookie:         propagate @self -> @ret
+rule V8_hostapi::Document.get_referrer:       propagate @self -> @ret
+rule V8_hostapi::Document.get_URL:            propagate @self -> @ret
+
+# Window.name getter
+rule V8_hostapi::Window.get_name:             propagate @self -> @ret
