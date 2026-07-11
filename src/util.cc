@@ -467,6 +467,7 @@ void SetFastMethod(Local<v8::Context> context,
       v8::String::NewFromUtf8(isolate, name.data(), type, name.size())
           .ToLocalChecked();
   that->Set(context, name_string, function).Check();
+  function->SetName(name_string);  // [DTA] Enable module prefix injection
 }
 
 void SetFastMethodNoSideEffect(Local<v8::Context> context,
@@ -489,6 +490,7 @@ void SetFastMethodNoSideEffect(Local<v8::Context> context,
       v8::String::NewFromUtf8(isolate, name.data(), type, name.size())
           .ToLocalChecked();
   that->Set(context, name_string, function).Check();
+  function->SetName(name_string);  // [DTA] Enable module prefix injection
 }
 
 void SetFastMethodNoSideEffect(Isolate* isolate,

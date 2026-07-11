@@ -871,6 +871,11 @@ static ExitCode InitializeNodeWithArgsInternal(
   // default value.
   V8::SetFlagsFromString("--rehash-snapshot");
 
+  // DTA cross-process inheritance: if parent set DTA_ACTIVE, enable --dta-maglev
+  if (getenv("DTA_ACTIVE")) {
+    V8::SetFlagsFromString("--dta-maglev");
+  }
+
 #if HAVE_OPENSSL
   // TODO(joyeecheung): make this a per-env option and move the normalization
   // into HandleEnvOptions.

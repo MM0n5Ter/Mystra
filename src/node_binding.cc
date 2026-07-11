@@ -9,6 +9,8 @@
 
 #include <string>
 
+#include "v8-taint.h"
+
 #if HAVE_OPENSSL
 #define NODE_BUILTIN_OPENSSL_BINDINGS(V) V(crypto) V(tls_wrap)
 #else
@@ -432,6 +434,15 @@ inline node_api_addon_get_api_version_func GetNapiAddonGetApiVersionCallback(
       dlib->GetSymbolAddress(STRINGIFY(NODE_API_MODULE_GET_API_VERSION)));
 }
 
+struct ScopedDTAAddonContext {
+  ScopedDTAAddonContext(const std::string& name) {
+    v8::taint::EnterAddonContext(name.c_str());
+  }
+  ~ScopedDTAAddonContext() {
+    v8::taint::LeaveAddonContext();
+  }
+};
+
 // DLOpen is process.dlopen(module, filename, flags).
 // Used to load 'module.node' dynamically shared objects.
 //
@@ -470,6 +481,28 @@ void DLOpen(const FunctionCallbackInfo<Value>& args) {
   }
 
   node::Utf8Value filename(env->isolate(), args[1]);  // Cast
+
+  // =====================================================================
+  // [DTA Hook] 提取第三方 Addon 名称并开启自动装载结界
+  // =====================================================================
+  std::string fname_str = *filename;
+  size_t slash = fname_str.find_last_of("/\\");
+  size_t dot = fname_str.find_last_of('.');
+  std::string addon_name = "unknown_addon";
+  
+  if (slash != std::string::npos && dot != std::string::npos && dot > slash) {
+    addon_name = fname_str.substr(slash + 1, dot - slash - 1); // 提取 "sqlite3"
+  } else if (slash != std::string::npos) {
+    addon_name = fname_str.substr(slash + 1);
+  } else {
+    addon_name = fname_str;
+  }
+  
+  // 实例化 RAII 守卫。它的构造函数会开启结界，
+  // 无论下面的 TryLoadAddon 发生什么异常，在其作用域结束时，析构函数都会绝对安全地关闭结界！
+  ScopedDTAAddonContext dta_guard(addon_name);
+  // =====================================================================
+  
   env->TryLoadAddon(*filename, flags, [&](DLib* dlib) {
     static Mutex dlib_load_mutex;
     Mutex::ScopedLock lock(dlib_load_mutex);
@@ -646,7 +679,18 @@ void GetInternalBinding(const FunctionCallbackInfo<Value>& args) {
 
   node_module* mod = FindModule(modlist_internal, *module_v, NM_F_INTERNAL);
   if (mod != nullptr) {
+    // =====================================================================
+    // [DTA Hook] 开启内置模块的装载结界
+    // *module_v 的值通常就是 "fs", "crypto", "url" 等完美的前缀
+    // =====================================================================
+    v8::taint::EnterAddonContext(*module_v);
+
+    // Node.js 原生的初始化逻辑：内部会连续调用 SetMethod 注册大量函数
     exports = InitInternalBinding(realm, mod);
+    
+    // =====================================================================
+    // [DTA Hook] 模块初始化完毕，关闭结界
+    // =====================================================================
     realm->internal_bindings.insert(mod);
   } else {
     return THROW_ERR_INVALID_MODULE(isolate, "No such binding: %s", module_v);
