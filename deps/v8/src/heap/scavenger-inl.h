@@ -24,6 +24,8 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots-inl.h"
 
+#include "src/taint/taint-adapter.h"
+
 namespace v8 {
 namespace internal {
 
@@ -66,6 +68,8 @@ bool Scavenger::MigrateObject(Tagged<Map> map, Tagged<HeapObject> source,
   target->set_map_word(map, kRelaxedStore);
   heap()->CopyBlock(target.address() + kTaggedSize,
                     source.address() + kTaggedSize, size - kTaggedSize);
+
+  taint::TaintAdapter::MoveHeapTaint(heap()->isolate(), source.address(), target.address());
 
   if (V8_UNLIKELY(is_logging_)) {
     heap()->OnMoveEvent(source, target, size);

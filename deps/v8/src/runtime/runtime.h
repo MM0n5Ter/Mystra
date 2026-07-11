@@ -423,6 +423,7 @@ namespace internal {
   F(PromiseHookInit, 2, 1)               \
   F(PromiseRejectEventFromStack, 2, 1)   \
   F(PromiseRevokeReject, 1, 1)           \
+  F(FulfillPromise, 2, 1)                \
   F(RejectPromise, 3, 1)                 \
   F(ResolvePromise, 2, 1)                \
   F(PromiseRejectAfterResolved, 2, 1)    \
@@ -826,6 +827,23 @@ namespace internal {
   F(HasElementWithInterceptor, 2, 1)         \
   F(ObjectAssignTryFastcase, 2, 1)
 
+#define FOR_EACH_INTRINSIC_TAINT(F, I)        \
+  F(TaintBinaryOpStub, 1, 1)                  \
+  F(SetTaint, -1, 1)                           \
+  F(GetTaint, 1, 1)                            \
+  F(DtaSetNamedPropertyTaint, 4, 1)            \
+  F(DtaApplyCallRuleTaint, 1, 1)               \
+  F(DtaMaglevCallPreHook, -1, 1)               \
+  F(DtaBindResultTaint, 1, 1)                  \
+  F(DtaPropagateBinaryOp, 3, 1)                \
+  F(DtaSuspendGeneratorTaint, 3, 1)            \
+  F(DtaResumeGeneratorTaint, 3, 1)             \
+  F(DtaCreateRestParameterTaint, 2, 1)         \
+  F(DtaCreateArgumentsTaint, 1, 1)             \
+  F(DtaBridgeAsyncReturn, 2, 1)                \
+  F(DtaCopyObjectTaint, 2, 1)                  \
+  F(DtaBridgeIterResultTaint, 2, 1)
+
 #define FOR_EACH_INTRINSIC_RETURN_OBJECT_IMPL(F, I)               \
   FOR_EACH_INTRINSIC_ARRAY(F, I)                                  \
   FOR_EACH_INTRINSIC_ATOMICS(F, I)                                \
@@ -854,6 +872,7 @@ namespace internal {
   FOR_EACH_INTRINSIC_SHADOW_REALM(F, I)                           \
   FOR_EACH_INTRINSIC_STRINGS(F, I)                                \
   FOR_EACH_INTRINSIC_SYMBOL(F, I)                                 \
+  FOR_EACH_INTRINSIC_TAINT(F, I)                                  \
   FOR_EACH_INTRINSIC_TEMPORAL(F, I)                               \
   FOR_EACH_INTRINSIC_TEST(F, I)                                   \
   FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)                             \

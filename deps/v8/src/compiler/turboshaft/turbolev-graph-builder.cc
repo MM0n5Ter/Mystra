@@ -4669,6 +4669,28 @@ class GraphBuildingNodeProcessor {
   }
 #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
+  // [DTA] Maglev DTA nodes are side-effect-only and never tier up to
+  // Turboshaft. If Turboshaft encounters them, it means the function
+  // should have been kept at Maglev tier. Bail out.
+#define DTA_NODE_BAILOUT(NodeType)                                     \
+  maglev::ProcessResult Process(maglev::NodeType*,                     \
+                                const maglev::ProcessingState&) {      \
+    return maglev::ProcessResult::kContinue;                           \
+  }
+  DTA_NODE_BAILOUT(DtaShadowRegToAcc)
+  DTA_NODE_BAILOUT(DtaShadowAccToReg)
+  DTA_NODE_BAILOUT(DtaShadowRegToReg)
+  DTA_NODE_BAILOUT(DtaTaintBinaryOp)
+  DTA_NODE_BAILOUT(DtaTaintBinaryOpSmi)
+  DTA_NODE_BAILOUT(DtaRestoreArgs)
+  DTA_NODE_BAILOUT(DtaDestroyFrame)
+  DTA_NODE_BAILOUT(DtaTaintPostCall)
+  DTA_NODE_BAILOUT(DtaCallPreHook)
+  DTA_NODE_BAILOUT(DtaShadowHeapLoad)
+  DTA_NODE_BAILOUT(DtaShadowHeapStore)
+  DTA_NODE_BAILOUT(DtaBindResultTaint)
+#undef DTA_NODE_BAILOUT
+
   maglev::ProcessResult Process(maglev::AssertInt32* node,
                                 const maglev::ProcessingState&) {
     bool negate_result = false;

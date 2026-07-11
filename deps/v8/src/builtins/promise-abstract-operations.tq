@@ -6,6 +6,9 @@
 #include 'src/builtins/builtins-promise-gen.h'
 
 namespace runtime {
+extern transitioning runtime FulfillPromise(
+    implicit context: Context)(JSPromise, JSAny): JSAny;
+
 extern transitioning runtime RejectPromise(
     implicit context: Context)(JSPromise, JSAny, Boolean): JSAny;
 
@@ -199,6 +202,16 @@ transitioning builtin FulfillPromise(
     implicit context: Context)(promise: JSPromise, value: JSAny): Undefined {
   // Assert: The value of promise.[[PromiseState]] is "pending".
   dcheck(promise.Status() == PromiseState::kPending);
+
+  // [DTA] When isolate promise hooks are active (DTA registers a no-op hook),
+  // delegate to C++ runtime where DTA taint propagation hooks fire.
+  // Same pattern as RejectPromise (line 239).
+  const promiseHookFlags = PromiseHookFlags();
+  if (IsIsolatePromiseHookEnabledOrDebugIsActiveOrHasAsyncEventDelegate(
+          promiseHookFlags)) {
+    runtime::FulfillPromise(promise, value);
+    return Undefined;
+  }
 
   RunContextPromiseHookResolve(promise);
 

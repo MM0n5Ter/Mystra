@@ -463,7 +463,21 @@ namespace interpreter {
   V(IncBlockCounter, ImplicitRegisterUse::kNone, OperandType::kIdx)            \
                                                                                \
   /* Execution Abort (internal error) */                                       \
-  V(Abort, ImplicitRegisterUse::kNone, OperandType::kIdx)
+  V(Abort, ImplicitRegisterUse::kNone, OperandType::kIdx)                      \
+                                                                               \
+  /* Taint tracking postcall for function call*/                               \
+  V(TaintPostCall, ImplicitRegisterUse::kReadAccumulator)                      \
+  V(DtaRestoreArgs, ImplicitRegisterUse::kNone)                                \
+  /* Taint tracking bytecodes for binary operations */                         \
+  /* Operand 1: register - left */                                             \
+  /* Operand 2: 8bit num (Operation Token, like Token::ADD) */                 \
+  V(TaintBinaryOp, ImplicitRegisterUse::kNone,                                 \
+    OperandType::kReg, OperandType::kFlag8)                                    \
+                                                                               \
+  /* Operand 1: Smi - left */                                                  \
+  /* Operand 2: 8bit num (Operation Token) */                                  \
+  V(TaintBinaryOpSmi, ImplicitRegisterUse::kNone,                              \
+    OperandType::kImm, OperandType::kFlag8)
 
 #ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
 #define BYTECODE_LIST_WITH_UNIQUE_HANDLERS(V, V_TSA) \

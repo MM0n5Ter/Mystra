@@ -1509,6 +1509,16 @@ void FinalizeUnoptimizedCompilation(
     IsCompiledScope is_compiled_scope(*shared_info, isolate);
     if (!is_compiled_scope.is_compiled()) continue;
 
+    // [DTA] Suppress JIT tiering for functions compiled through
+    // BytecodeGenerator. These functions contain DTA taint-tracking bytecodes
+    // that only have working handlers in the Ignition interpreter. Disabling
+    // optimization prevents Sparkplug/Maglev/Turbofan tiering while allowing
+    // V8 builtins and native code to JIT-compile normally.
+    if (v8_flags.dta_suppress_jit && !shared_info->optimization_disabled()) {
+      shared_info->DisableOptimization(isolate,
+                                       BailoutReason::kNeverOptimize);
+    }
+
     if (need_source_positions) {
       SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared_info);
     }

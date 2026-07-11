@@ -22,6 +22,7 @@
 #include "src/interpreter/interpreter-assembler.h"
 #include "src/interpreter/interpreter-generator-tsa.h"
 #include "src/interpreter/interpreter-intrinsics-generator.h"
+#include "src/interpreter/interpreter-intrinsics.h"
 #include "src/objects/cell.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/objects-inl.h"
@@ -70,6 +71,10 @@ using Label = CodeStubAssembler::Label;
 IGNITION_HANDLER(LdaZero, InterpreterAssembler) {
   TNode<Number> zero_value = NumberConstant(0.0);
   SetAccumulator(zero_value);
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -79,6 +84,10 @@ IGNITION_HANDLER(LdaZero, InterpreterAssembler) {
 IGNITION_HANDLER(LdaSmi, InterpreterAssembler) {
   TNode<Smi> smi_int = BytecodeOperandImmSmi(0);
   SetAccumulator(smi_int);
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -88,6 +97,10 @@ IGNITION_HANDLER(LdaSmi, InterpreterAssembler) {
 IGNITION_HANDLER(LdaConstant, InterpreterAssembler) {
   TNode<Object> constant = LoadConstantPoolEntryAtOperandIndex(0);
   SetAccumulator(constant);
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -96,6 +109,10 @@ IGNITION_HANDLER(LdaConstant, InterpreterAssembler) {
 // Load Undefined into the accumulator.
 IGNITION_HANDLER(LdaUndefined, InterpreterAssembler) {
   SetAccumulator(UndefinedConstant());
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -104,6 +121,10 @@ IGNITION_HANDLER(LdaUndefined, InterpreterAssembler) {
 // Load Null into the accumulator.
 IGNITION_HANDLER(LdaNull, InterpreterAssembler) {
   SetAccumulator(NullConstant());
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -112,6 +133,10 @@ IGNITION_HANDLER(LdaNull, InterpreterAssembler) {
 // Load TheHole into the accumulator.
 IGNITION_HANDLER(LdaTheHole, InterpreterAssembler) {
   SetAccumulator(TheHoleConstant());
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -120,6 +145,10 @@ IGNITION_HANDLER(LdaTheHole, InterpreterAssembler) {
 // Load True into the accumulator.
 IGNITION_HANDLER(LdaTrue, InterpreterAssembler) {
   SetAccumulator(TrueConstant());
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -128,6 +157,10 @@ IGNITION_HANDLER(LdaTrue, InterpreterAssembler) {
 // Load False into the accumulator.
 IGNITION_HANDLER(LdaFalse, InterpreterAssembler) {
   SetAccumulator(FalseConstant());
+
+  // [Taint] clean shadow acc — INLINE (zero C calls)
+  InlineSetAccTaint(Int32Constant(0));
+
   Dispatch();
 }
 
@@ -137,6 +170,13 @@ IGNITION_HANDLER(LdaFalse, InterpreterAssembler) {
 IGNITION_HANDLER(Ldar, InterpreterAssembler) {
   TNode<Object> value = LoadRegisterAtOperandIndex(0);
   SetAccumulator(value);
+
+  // --- DTA INLINE (zero C calls) ---
+  TNode<Int32T> reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(0));
+  TNode<Word32T> taint_id = InlineGetRegTaint(reg_idx);
+  InlineSetAccTaint(taint_id);
+  // --- DTA END ---
+
   Dispatch();
 }
 
@@ -146,6 +186,13 @@ IGNITION_HANDLER(Ldar, InterpreterAssembler) {
 IGNITION_HANDLER(Star, InterpreterAssembler) {
   TNode<Object> accumulator = GetAccumulator();
   StoreRegisterAtOperandIndex(accumulator, 0);
+
+  // --- DTA INLINE (zero C calls) ---
+  TNode<Int32T> reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(0));
+  TNode<Word32T> taint_id = InlineGetAccTaint();
+  InlineSetRegTaint(reg_idx, taint_id);
+  // --- DTA end ---
+
   Dispatch();
 }
 
@@ -160,6 +207,7 @@ IGNITION_HANDLER(Star0, InterpreterAssembler) {
   TNode<Object> accumulator = GetAccumulator();
   TNode<WordT> opcode = LoadBytecode(BytecodeOffset());
   StoreRegisterForShortStar(accumulator, opcode);
+  // NOTE: DTA taint hook is inside StoreRegisterForShortStar (interpreter-assembler.cc:890)
   Dispatch();
 }
 
@@ -169,6 +217,14 @@ IGNITION_HANDLER(Star0, InterpreterAssembler) {
 IGNITION_HANDLER(Mov, InterpreterAssembler) {
   TNode<Object> src_value = LoadRegisterAtOperandIndex(0);
   StoreRegisterAtOperandIndex(src_value, 1);
+
+  // --- DTA INLINE (zero C calls) ---
+  TNode<Int32T> src_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(0));
+  TNode<Int32T> dst_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+  TNode<Word32T> taint_id = InlineGetRegTaint(src_reg_idx);
+  InlineSetRegTaint(dst_reg_idx, taint_id);
+  // --- DTA end ---
+
   Dispatch();
 }
 
@@ -183,12 +239,6 @@ class InterpreterLoadGlobalAssembler : public InterpreterAssembler {
     TNode<Union<FeedbackVector, Undefined>> maybe_feedback_vector =
         LoadFeedbackVector();
 
-    AccessorAssembler accessor_asm(state());
-    ExitPoint exit_point(this, [=, this](TNode<Object> result) {
-      SetAccumulator(result);
-      Dispatch();
-    });
-
     LazyNode<TaggedIndex> lazy_slot = [=, this] {
       return BytecodeOperandIdxTaggedIndex(slot_operand_index);
     };
@@ -200,6 +250,31 @@ class InterpreterLoadGlobalAssembler : public InterpreterAssembler {
           CAST(LoadConstantPoolEntryAtOperandIndex(name_operand_index));
       return name;
     };
+
+    AccessorAssembler accessor_asm(state());
+    ExitPoint exit_point(this, [=, this](TNode<Object> result) {
+      SetAccumulator(result);
+
+      // ===========================================================================
+      // [DTA Inline Hook] 拦截 LdaGlobal，降维为对物理 GlobalProxy 的属性读取
+      // ===========================================================================
+      // 1. 获取当前 Context 所属的 NativeContext
+      // (注意：这里直接调用 GetContext() 即可，避免重复展开 lazy_context)
+      TNode<NativeContext> native_context = LoadNativeContext(GetContext());
+      
+      // 2. 提取出真正的物理全局对象 (Global Proxy)
+      TNode<Object> global_proxy = LoadContextElement(native_context, Context::GLOBAL_PROXY_INDEX);
+      
+      // 3. 提取全局变量的 Name，并复用 NamedProperty 逻辑去查影子堆
+      TNode<Name> name = lazy_name(); 
+      TNode<Word32T> prop_taint = CallGetNamedPropertyTaint(global_proxy, name, GetAccumulator());
+      
+      // 4. 将查到的污点覆写进影子累加器！闭环达成！
+      InlineSetAccTaint(prop_taint);
+      // ===========================================================================
+
+      Dispatch();
+    });
 
     accessor_asm.LoadGlobalIC(maybe_feedback_vector, lazy_slot, lazy_context,
                               lazy_name, typeof_mode, &exit_point);
@@ -241,6 +316,20 @@ IGNITION_HANDLER(StaGlobal, InterpreterAssembler) {
   TNode<TaggedIndex> slot = BytecodeOperandIdxTaggedIndex(1);
   TNode<HeapObject> maybe_vector = LoadFeedbackVector();
 
+  // ===========================================================================
+  // [DTA Inline Hook] 拦截 StaGlobal，将累加器污点写入物理 GlobalProxy 对象
+  // ===========================================================================
+  // 1. 获取真正的物理全局对象 (Global Proxy)
+  TNode<NativeContext> native_context = LoadNativeContext(context);
+  TNode<Object> global_proxy = LoadContextElement(native_context, Context::GLOBAL_PROXY_INDEX);
+  
+  // 2. 提取准备写入的 Value 身上携带的污点 (在累加器中)
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+
+  // 3. 降维打击：像处理普通对象属性一样，把全局变量存入 shadow_heap_
+  CallSetNamedPropertyTaint(global_proxy, name, value_taint);
+  // ===========================================================================
+
   TNode<Object> result = CallBuiltin(Builtin::kStoreGlobalIC, context, name,
                                      value, slot, maybe_vector);
   // To avoid special logic in the deoptimizer to re-materialize the value in
@@ -264,6 +353,16 @@ IGNITION_HANDLER(LdaContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContextAtDepth(context, depth);
   TNode<Object> result = LoadContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 闭包变量读取：影子堆 (Context Object) -> 累加器
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -278,6 +377,15 @@ IGNITION_HANDLER(LdaScriptContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContextAtDepth(context, depth);
   TNode<Object> result = LoadScriptContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 读取脚本上下文变量
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -292,6 +400,15 @@ IGNITION_HANDLER(LdaImmutableContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContextAtDepth(context, depth);
   TNode<Object> result = LoadContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 读取不可变上下文变量
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -303,6 +420,15 @@ IGNITION_HANDLER(LdaCurrentContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContext();
   TNode<Object> result = LoadContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 读取当前上下文变量
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -314,6 +440,15 @@ IGNITION_HANDLER(LdaCurrentScriptContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContext();
   TNode<Object> result = LoadScriptContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 读取当前脚本上下文变量
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -325,6 +460,15 @@ IGNITION_HANDLER(LdaImmutableCurrentContextSlot, InterpreterAssembler) {
   TNode<Context> slot_context = GetContext();
   TNode<Object> result = LoadContextElement(slot_context, slot_index);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] 读取当前不可变上下文变量
+  // ===========================================================================
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  TNode<Word32T> context_taint = CallGetKeyedPropertyTaint(slot_context, tagged_slot, GetAccumulator());
+  InlineSetAccTaint(context_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -338,6 +482,18 @@ IGNITION_HANDLER(StaContextSlot, InterpreterAssembler) {
   TNode<IntPtrT> slot_index = Signed(BytecodeOperandIdx(1));
   TNode<Uint32T> depth = BytecodeOperandUImm(2);
   TNode<Context> slot_context = GetContextAtDepth(context, depth);
+
+  // ===========================================================================
+  // [DTA Hook] 闭包变量赋值：累加器 -> 影子堆 (Context Object)
+  // 复用 KeyedProperty 逻辑，将 context 作为 obj，slot_index 作为 key
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+
+  // 将 uintptr_t 类型的 slot_index 转换为 V8 Tagged Smi，以符合接口签名
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  CallSetKeyedPropertyTaint(slot_context, tagged_slot, value_taint, Int32Constant(0));
+  // ===========================================================================
+
   StoreContextElement(slot_context, slot_index, value);
   Dispatch();
 }
@@ -350,6 +506,15 @@ IGNITION_HANDLER(StaCurrentContextSlot, InterpreterAssembler) {
   TNode<Object> value = GetAccumulator();
   TNode<IntPtrT> slot_index = Signed(BytecodeOperandIdx(0));
   TNode<Context> slot_context = GetContext();
+
+  // ===========================================================================
+  // [DTA Hook] 写入当前上下文变量
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  CallSetKeyedPropertyTaint(slot_context, tagged_slot, value_taint, Int32Constant(0));
+  // ===========================================================================
+
   StoreContextElement(slot_context, slot_index, value);
   Dispatch();
 }
@@ -364,6 +529,15 @@ IGNITION_HANDLER(StaScriptContextSlot, InterpreterAssembler) {
   TNode<IntPtrT> slot_index = Signed(BytecodeOperandIdx(1));
   TNode<Uint32T> depth = BytecodeOperandUImm(2);
   TNode<Context> slot_context = GetContextAtDepth(context, depth);
+
+  // ===========================================================================
+  // [DTA Hook] 写入脚本上下文变量
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  CallSetKeyedPropertyTaint(slot_context, tagged_slot, value_taint, Int32Constant(0));
+  // ===========================================================================
+
   StoreContextElementAndUpdateSideData(slot_context, slot_index, value);
   Dispatch();
 }
@@ -376,6 +550,15 @@ IGNITION_HANDLER(StaCurrentScriptContextSlot, InterpreterAssembler) {
   TNode<Object> value = GetAccumulator();
   TNode<IntPtrT> slot_index = Signed(BytecodeOperandIdx(0));
   TNode<Context> slot_context = GetContext();
+
+  // ===========================================================================
+  // [DTA Hook] 写入当前脚本上下文变量
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Smi> tagged_slot = SmiTag(slot_index);
+  CallSetKeyedPropertyTaint(slot_context, tagged_slot, value_taint, Int32Constant(0));
+  // ===========================================================================
+
   StoreContextElementAndUpdateSideData(slot_context, slot_index, value);
   Dispatch();
 }
@@ -625,6 +808,16 @@ IGNITION_HANDLER(GetNamedProperty, InterpreterAssembler) {
   BIND(&done);
   {
     SetAccumulator(var_result.value());
+
+    // ===========================================================================
+    // [DTA] Property load → shadow heap query + deep wildcard contagion
+    // ===========================================================================
+    TNode<Name> name = lazy_name();
+    TNode<Object> result = GetAccumulator();
+    TNode<Word32T> prop_taint = CallGetNamedPropertyTaint(recv, name, result);
+    InlineSetAccTaint(prop_taint);
+    // ===========================================================================
+
     Dispatch();
   }
 }
@@ -647,6 +840,14 @@ IGNITION_HANDLER(GetNamedPropertyFromSuper, InterpreterAssembler) {
       CallBuiltin(Builtin::kLoadSuperIC, context, receiver,
                   home_object_prototype, name, slot, feedback_vector);
   SetAccumulator(result);
+
+  // =========================================================================
+  // [DTA Hook] super.prop load: shadow heap (receiver, name) → accumulator
+  // =========================================================================
+  TNode<Word32T> prop_taint = CallGetNamedPropertyTaint(receiver, CAST(name), GetAccumulator());
+  InlineSetAccTaint(prop_taint);
+  // =========================================================================
+
   Dispatch();
 }
 
@@ -665,6 +866,15 @@ IGNITION_HANDLER(GetKeyedProperty, InterpreterAssembler) {
   var_result = CallBuiltin(Builtin::kKeyedLoadIC, context, object, name, slot,
                            feedback_vector);
   SetAccumulator(var_result.value());
+
+  // ===========================================================================
+  // [DTA] Keyed property load → shadow heap query + deep wildcard contagion
+  // ===========================================================================
+  TNode<Object> result = GetAccumulator();
+  TNode<Word32T> prop_taint = CallGetKeyedPropertyTaint(object, name, result);
+  InlineSetAccTaint(prop_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -686,6 +896,17 @@ IGNITION_HANDLER(GetEnumeratedKeyedProperty, InterpreterAssembler) {
   var_result = CallBuiltin(Builtin::kEnumeratedKeyedLoadIC, context, object,
                            name, enum_index, cache_type, slot, feedback_vector);
   SetAccumulator(var_result.value());
+
+  // ===========================================================================
+  // [DTA] For-in property load → shadow heap query + deep wildcard contagion
+  // Same hook as GetKeyedProperty — for-in loads must propagate taint from
+  // source objects with DEEP wildcards (JSON.parse merge pattern).
+  // ===========================================================================
+  TNode<Object> result = GetAccumulator();
+  TNode<Word32T> prop_taint = CallGetKeyedPropertyTaint(object, name, result);
+  InlineSetAccTaint(prop_taint);
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -703,6 +924,14 @@ class InterpreterSetNamedPropertyAssembler : public InterpreterAssembler {
     TNode<TaggedIndex> slot = BytecodeOperandIdxTaggedIndex(2);
     TNode<HeapObject> maybe_vector = LoadFeedbackVector();
     TNode<Context> context = GetContext();
+
+    // ===========================================================================
+    // [DTA Inline Hook] 语义透明的数据流转：栈 -> 堆
+    // 此时操作数已就绪，在触发 V8 原生 IC 存储前，同步更新双层影子堆
+    // ===========================================================================
+    TNode<Word32T> value_taint = InlineGetAccTaint();
+    CallSetNamedPropertyTaint(object, name, value_taint);
+    // ===========================================================================
 
     TNode<Object> result = CallBuiltin(ic_bultin, context, object, name, value,
                                        slot, maybe_vector);
@@ -752,6 +981,14 @@ IGNITION_HANDLER(SetKeyedProperty, InterpreterAssembler) {
   TNode<HeapObject> maybe_vector = LoadFeedbackVector();
   TNode<Context> context = GetContext();
 
+  // ===========================================================================
+  // [DTA Hook] Property store taint: value + key register taint
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Word32T> key_reg_taint = InlineGetRegTaint(TruncateIntPtrToInt32(BytecodeOperandReg(1)));
+  CallSetKeyedPropertyTaint(object, name, value_taint, key_reg_taint);
+  // ===========================================================================
+
   // KeyedStoreIC is currently a base class for multiple keyed property store
   // operations and contains mixed logic for set and define operations,
   // the paths are controlled by feedback.
@@ -787,6 +1024,14 @@ IGNITION_HANDLER(DefineKeyedOwnProperty, InterpreterAssembler) {
   TNode<HeapObject> maybe_vector = LoadFeedbackVector();
   TNode<Context> context = GetContext();
 
+  // =========================================================================
+  // [DTA Hook] DefineKeyedOwnProperty: value + key register taint
+  // =========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Word32T> dko_key_taint = InlineGetRegTaint(TruncateIntPtrToInt32(BytecodeOperandReg(1)));
+  CallSetKeyedPropertyTaint(object, name, value_taint, dko_key_taint);
+  // =========================================================================
+
   TNode<Object> result =
       CallBuiltin(Builtin::kDefineKeyedOwnIC, context, object, name, value,
                   flags, slot, maybe_vector);
@@ -810,6 +1055,15 @@ IGNITION_HANDLER(StaInArrayLiteral, InterpreterAssembler) {
   TNode<TaggedIndex> slot = BytecodeOperandIdxTaggedIndex(2);
   TNode<HeapObject> feedback_vector = LoadFeedbackVector();
   TNode<Context> context = GetContext();
+
+  // ===========================================================================
+  // [DTA Inline Hook] 语义透明的数据流转：栈 -> 堆 (Array Literal)
+  // 提取累加器污点，并同步更新双层影子堆
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  // 将数组索引 (index) 作为 property name 写入影子堆
+  CallSetKeyedPropertyTaint(array, index, value_taint, Int32Constant(0));
+  // ===========================================================================
 
   TNode<Object> result =
       CallBuiltin(Builtin::kStoreInArrayLiteralIC, context, array, index, value,
@@ -841,6 +1095,14 @@ IGNITION_HANDLER(DefineKeyedOwnPropertyInLiteral, InterpreterAssembler) {
 
   TNode<HeapObject> feedback_vector = LoadFeedbackVector();
   TNode<Context> context = GetContext();
+
+  // ===========================================================================
+  // [DTA Inline Hook] Object literal keyed property: value + key taint
+  // ===========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Word32T> lit_key_taint = InlineGetRegTaint(TruncateIntPtrToInt32(BytecodeOperandReg(1)));
+  CallSetKeyedPropertyTaint(object, name, value_taint, lit_key_taint);
+  // ===========================================================================
 
   CallRuntime(Runtime::kDefineKeyedOwnPropertyInLiteral, context, object, name,
               value, flags, feedback_vector, slot);
@@ -889,6 +1151,15 @@ IGNITION_HANDLER(LdaModuleVariable, InterpreterAssembler) {
   }
 
   BIND(&end);
+  {
+    // =========================================================================
+    // [DTA Hook] Module variable load: module cell → accumulator
+    // =========================================================================
+    TNode<Smi> tagged_index = SmiTag(cell_index);
+    TNode<Word32T> mod_taint = CallGetKeyedPropertyTaint(module, tagged_index, GetAccumulator());
+    InlineSetAccTaint(mod_taint);
+    // =========================================================================
+  }
   Dispatch();
 }
 
@@ -904,6 +1175,14 @@ IGNITION_HANDLER(StaModuleVariable, InterpreterAssembler) {
   TNode<Context> module_context = GetContextAtDepth(GetContext(), depth);
   TNode<SourceTextModule> module =
       CAST(LoadContextElement(module_context, Context::EXTENSION_INDEX));
+
+  // =========================================================================
+  // [DTA Hook] Module variable store: accumulator → module cell
+  // =========================================================================
+  TNode<Word32T> value_taint = InlineGetAccTaint();
+  TNode<Smi> tagged_index = SmiTag(cell_index);
+  CallSetKeyedPropertyTaint(module, tagged_index, value_taint, Int32Constant(0));
+  // =========================================================================
 
   Label if_export(this), if_import(this), end(this);
   Branch(IntPtrGreaterThan(cell_index, IntPtrConstant(0)), &if_export,
@@ -1506,6 +1785,31 @@ class InterpreterJSCallAssembler : public InterpreterAssembler {
                         slot_id);
 #endif  // !V8_JITLESS
 
+    // =========================================================================
+    // [DTA Pre-Hook] Inline arg taint buffer + skip stack
+    // =========================================================================
+    DtaPushSkip(DtaCheckSFITaintSkip(function));
+    {
+      // Use GetInterpretedFramePointer() (= LoadParentFramePointer), NOT
+      // LoadFramePointer(). V8's register file is addressed relative to the
+      // interpreted frame pointer, which is *(rbp) in Ignition handlers.
+      TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+      TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+      TNode<Object> receiver_obj;
+      bool prepend_receiver = (receiver_mode == ConvertReceiverMode::kNullOrUndefined);
+      if (prepend_receiver) {
+          receiver_obj = UndefinedConstant();
+      } else {
+          receiver_obj = LoadRegisterAtOperandIndex(1);
+      }
+      TNode<Int32T> arg_count = Signed(args.reg_count());
+      // Pre-read arg taints inline (zero C calls!)
+      DtaFillArgTaintBuf(first_reg_idx, arg_count, prepend_receiver);
+      // C++ still needed for classification + arg_reg_mapping (PostHook uses it)
+      CallPrepareRuntimeArgs(frame_ptr, function, receiver_obj, first_reg_idx, arg_count, prepend_receiver);
+    }
+    // =========================================================================
+
     // Call the function and dispatch to the next handler.
     CallJSAndDispatch(function, context, args, receiver_mode);
   }
@@ -1537,6 +1841,79 @@ class InterpreterJSCallAssembler : public InterpreterAssembler {
     CollectCallFeedback(function, receiver, context, maybe_feedback_vector,
                         slot_id);
 #endif  // !V8_JITLESS
+
+    // =========================================================================
+    // [DTA Pre-Hook] Phase 3: with skip stack (no branching — always hook)
+    // =========================================================================
+    DtaPushSkip(DtaCheckSFITaintSkip(function));
+    {
+      TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+      bool prepend_receiver = (receiver_mode == ConvertReceiverMode::kNullOrUndefined);
+      TNode<Object> receiver_obj = prepend_receiver
+          ? UndefinedConstant()
+          : (kReceiverAndArgOperandCount > 0
+              ? LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex)
+              : UndefinedConstant());
+
+      // Fill the inline taint buffer for DtaTransferArgTaintsFromBuf.
+      // JSCallN has non-contiguous register operands, so we fill per-register
+      // instead of using the generic DtaFillArgTaintBuf loop.
+      {
+        TNode<ExternalReference> buf_ref = ExternalConstant(
+            ExternalReference::taint_arg_taint_buf_address(isolate()));
+        TNode<ExternalReference> count_ref = ExternalConstant(
+            ExternalReference::taint_arg_count_address(isolate()));
+        TNode<RawPtrT> buf = ReinterpretCast<RawPtrT>(buf_ref);
+        int buf_idx = 0;
+
+        if (prepend_receiver) {
+          // Undefined receiver → taint 0
+          StoreNoWriteBarrier(MachineRepresentation::kWord32, buf,
+              IntPtrConstant(buf_idx * sizeof(uint32_t)), Int32Constant(0));
+          buf_idx++;
+        }
+
+        // Read each register's taint and write to buffer
+        for (int i = 0; i < kReceiverAndArgOperandCount; i++) {
+          TNode<Int32T> reg = TruncateIntPtrToInt32(
+              BytecodeOperandReg(kFirstArgumentOperandIndex + i));
+          TNode<Word32T> taint = InlineGetRegTaint(reg);
+          StoreNoWriteBarrier(MachineRepresentation::kWord32, buf,
+              IntPtrConstant((buf_idx + i) * sizeof(uint32_t)), taint);
+        }
+
+        StoreNoWriteBarrier(MachineRepresentation::kWord8, count_ref,
+            ReinterpretCast<Uint8T>(
+                Int32Constant(buf_idx + kReceiverAndArgOperandCount)));
+      }
+
+      switch (kReceiverAndArgOperandCount) {
+        case 0:
+          CallPrepareRuntimeArgs_N0(frame_ptr, function, receiver_obj, prepend_receiver);
+          break;
+        case 1: {
+          TNode<Int32T> reg0 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex));
+          CallPrepareRuntimeArgs_N1(frame_ptr, function, receiver_obj, reg0, prepend_receiver);
+          break;
+        }
+        case 2: {
+          TNode<Int32T> reg0 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex));
+          TNode<Int32T> reg1 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex + 1));
+          CallPrepareRuntimeArgs_N2(frame_ptr, function, receiver_obj, reg0, reg1, prepend_receiver);
+          break;
+        }
+        case 3: {
+          TNode<Int32T> reg0 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex));
+          TNode<Int32T> reg1 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex + 1));
+          TNode<Int32T> reg2 = TruncateIntPtrToInt32(BytecodeOperandReg(kFirstArgumentOperandIndex + 2));
+          CallPrepareRuntimeArgs_N3(frame_ptr, function, receiver_obj, reg0, reg1, reg2, prepend_receiver);
+          break;
+        }
+        default:
+          UNREACHABLE();
+      }
+    }
+    // =========================================================================
 
     switch (kReceiverAndArgOperandCount) {
       case 0:
@@ -1616,8 +1993,78 @@ IGNITION_HANDLER(CallUndefinedReceiver2, InterpreterJSCallAssembler) {
 IGNITION_HANDLER(CallRuntime, InterpreterAssembler) {
   TNode<Uint32T> function_id = BytecodeOperandRuntimeId(0);
   RegListNodePair args = GetRegisterListAtOperandIndex(1);
+
+  // ===========================================================================
+  // [DTA Pre-hook] Fill arg taint buffer + classify runtime function
+  // ===========================================================================
+  TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+  TNode<Smi> tagged_id = SmiFromUint32(function_id);
+  TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+  TNode<Int32T> arg_count = Signed(args.reg_count());
+  TNode<Object> receiver_obj = UndefinedConstant();
+
+  // [FIX] Fill dta_arg_taint_buf inline BEFORE C++ classify.
+  // Previously missing — caused Runtime_GetTaint to read stale buffer data.
+  DtaFillArgTaintBuf(first_reg_idx, arg_count, /* prepend_receiver */ false);
+
+  CallPrepareRuntimeArgs(frame_ptr, tagged_id, receiver_obj, first_reg_idx, arg_count, true);
+
+  // Read runtime_action_table[function_id] for post-hook decision.
+  // Values: 0x00=Tracked, 0x02=Preserve, 0x03=Untracked.
+  TVARIABLE(Word32T, var_action, Int32Constant(0x00));
+  {
+    TNode<ExternalReference> table_ref = ExternalConstant(
+        ExternalReference::taint_runtime_action_table_address(isolate()));
+    TNode<RawPtrT> table_ptr = ReinterpretCast<RawPtrT>(
+        Load(MachineType::Pointer(), table_ref));
+    Label table_ok(this), table_null(this);
+    Branch(WordEqual(table_ptr, IntPtrConstant(0)), &table_null, &table_ok);
+    BIND(&table_ok);
+    var_action = Load<Uint8T>(table_ptr, ChangeUint32ToWord(function_id));
+    Goto(&table_null);
+    BIND(&table_null);
+  }
+  // ===========================================================================
+
   TNode<Context> context = GetContext();
   TNode<Object> result = CallRuntimeN(function_id, context, args, 1);
+
+  // ===========================================================================
+  // [DTA Post-hook] Action-aware: Tracked → apply rules, Preserve → keep acc
+  // ===========================================================================
+  {
+    Label preserve(this), tracked(this), done(this);
+
+    // Preserve (0x02): keep shadow_acc, just LeaveCallFrame.
+    GotoIf(Word32Equal(var_action.value(), Int32Constant(0x02)), &preserve);
+    Goto(&tracked);
+
+    BIND(&tracked);
+    {
+      // Tracked (0x00) or Untracked (0x03): full post-hook pipeline.
+      TNode<ExternalReference> function_ref =
+          ExternalConstant(ExternalReference::taint_apply_call_rule());
+      TNode<Word32T> result_taint = UncheckedCast<Word32T>(CallCFunction(
+          function_ref, MachineType::Uint32(),
+          std::make_pair(MachineType::AnyTagged(), result)));
+      InlineSetAccTaint(result_taint);
+    }
+    Goto(&done);
+
+    BIND(&preserve);
+    {
+      // Preserve: shadow_acc stays as-is. LeaveCallFrame balances the
+      // EnterCallFrame from MapArgsToEngine inside CallPrepareRuntimeArgs.
+      TNode<ExternalReference> leave_ref =
+          ExternalConstant(ExternalReference::taint_leave_call_frame_static());
+      CallCFunction(leave_ref, MachineType::AnyTagged());
+    }
+    Goto(&done);
+
+    BIND(&done);
+  }
+  // ===========================================================================
+
   SetAccumulator(result);
   Dispatch();
 }
@@ -1634,6 +2081,62 @@ IGNITION_HANDLER(InvokeIntrinsic, InterpreterAssembler) {
   TNode<Object> result =
       GenerateInvokeIntrinsic(this, function_id, context, args);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] Bridge value taint through CreateIterResultObject.
+  //
+  // CreateIterResultObject(value, done) is an uninstrumented V8 intrinsic.
+  // It drops value's taint because it's a black-box C++ builtin.
+  // We call Runtime_DtaBridgeIterResultTaint to store the value register's
+  // shadow taint directly on the IterResultObject (ELEM_WILDCARD_KEY).
+  //
+  // This is a targeted hook — InvokeIntrinsic is a sealed dispatcher and
+  // cannot be generalized via TSL rules (documented architectural limitation).
+  // ===========================================================================
+  {
+    Label dta_done(this);
+    TNode<Uint32T> kCreateIter = Uint32Constant(static_cast<uint32_t>(
+        interpreter::IntrinsicsHelper::IntrinsicId::kCreateIterResultObject));
+    TNode<Uint32T> kAsyncGenYield = Uint32Constant(static_cast<uint32_t>(
+        interpreter::IntrinsicsHelper::IntrinsicId::kAsyncGeneratorYieldWithAwait));
+
+    // Sync generator: CreateIterResultObject(value, done) — value is arg[0]
+    Label not_create_iter(this);
+    GotoIfNot(Word32Equal(function_id, kCreateIter), &not_create_iter);
+    {
+      TNode<Context> ctx = GetContext();
+      // BytecodeOperandReg(1) = operand of arg[0] = value register.
+      TNode<Smi> value_operand_smi =
+          SmiTag(Signed(BytecodeOperandReg(1)));
+      CallRuntime(Runtime::kDtaBridgeIterResultTaint, ctx,
+                  result, value_operand_smi);
+      Goto(&dta_done);
+    }
+    BIND(&not_create_iter);
+
+    // Async generator: AsyncGeneratorYieldWithAwait(generator, value) —
+    // value is arg[1]. The IterResultObject is created later inside Torque,
+    // but the value object travels with it. Store taint on the value object
+    // so it's found when the caller reads .value via LdaNamedProperty.
+    GotoIfNot(Word32Equal(function_id, kAsyncGenYield), &dta_done);
+    {
+      TNode<Context> ctx = GetContext();
+      // Value is the SECOND register: operand = BytecodeOperandReg(1) + 1
+      // For "InvokeIntrinsic [id], r6-r7": BytecodeOperandReg(1) = r6 operand,
+      // r7 operand = r6_operand - 1 (registers go downward: r6=-13, r7=-14)
+      TNode<IntPtrT> base_operand = BytecodeOperandReg(1);
+      TNode<Smi> value_operand_smi =
+          SmiTag(Signed(IntPtrSub(base_operand, IntPtrConstant(1))));
+      // Load the value object (arg[1]) to store taint directly on it
+      TNode<Object> value_obj = LoadRegisterFromRegisterList(args, 1);
+      CallRuntime(Runtime::kDtaBridgeIterResultTaint, ctx,
+                  value_obj, value_operand_smi);
+    }
+    Goto(&dta_done);
+    BIND(&dta_done);
+  }
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -1672,6 +2175,20 @@ IGNITION_HANDLER(CallJSRuntime, InterpreterAssembler) {
   TNode<JSAny> function =
       CAST(LoadContextElement(native_context, context_index));
 
+  // =========================================================================
+  // [DTA Pre-Hook] CallJSRuntime: context builtins (Reflect.construct, etc.)
+  // =========================================================================
+  DtaPushSkip(DtaCheckSFITaintSkip(function));
+  {
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+    TNode<Int32T> arg_count = Signed(args.reg_count());
+    DtaFillArgTaintBuf(first_reg_idx, arg_count, true);
+    CallPrepareRuntimeArgs(frame_ptr, function, UndefinedConstant(),
+                           first_reg_idx, arg_count, true);
+  }
+  // =========================================================================
+
   // Call the function.
   CallJSAndDispatch(function, context, args,
                     ConvertReceiverMode::kNullOrUndefined);
@@ -1689,6 +2206,38 @@ IGNITION_HANDLER(CallWithSpread, InterpreterAssembler) {
   TNode<UintPtrT> slot_id = BytecodeOperandIdx(3);
   TNode<Context> context = GetContext();
 
+  // =========================================================================
+  // [DTA Pre-Hook] CallWithSpread: expand spread array taint in C++
+  // Register list = [receiver, arg0, ..., spread_array]
+  // Normal args = reg_count - 1 (exclude spread), spread = last register.
+  // C++ resolves JSArray length and ElementWildcard from shadow heap.
+  // =========================================================================
+  DtaPushSkip(DtaCheckSFITaintSkip(callable));
+  {
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+    TNode<Int32T> total_reg_count = Signed(args.reg_count());
+    // Normal arg count = total - 1 (the last register is the spread array)
+    TNode<Int32T> normal_arg_count = Int32Sub(total_reg_count, Int32Constant(1));
+    // Spread register is the last in the contiguous list.
+    // In V8 interpreter, register lists grow downward: reg_i = first_reg - i
+    // So spread = first_reg - (total - 1)
+    TNode<Int32T> spread_reg_idx = Int32Sub(first_reg_idx,
+        Int32Sub(total_reg_count, Int32Constant(1)));
+    // Load the spread array: read tagged value from interpreted frame at
+    // the spread register's offset. fp + operand * kSystemPointerSize.
+    TNode<IntPtrT> spread_offset = TimesSystemPointerSize(
+        ChangeInt32ToIntPtr(spread_reg_idx));
+    TNode<Object> spread_obj = LoadFullTagged(frame_ptr, spread_offset);
+    // Fill normal args' taint from shadow frame (NOT including spread)
+    DtaFillArgTaintBuf(first_reg_idx, normal_arg_count, false);
+    // C++ expands spread array → appends per-element taint
+    CallPrepareSpreadRuntimeArgs(frame_ptr, callable,
+                                  first_reg_idx, normal_arg_count,
+                                  spread_reg_idx, spread_obj);
+  }
+  // =========================================================================
+
   // Call into Runtime function CallWithSpread which does everything.
   CallJSWithSpreadAndDispatch(callable, context, args, slot_id);
 }
@@ -1705,6 +2254,20 @@ IGNITION_HANDLER(ConstructWithSpread, InterpreterAssembler) {
   RegListNodePair args = GetRegisterListAtOperandIndex(1);
   TNode<UintPtrT> slot_id = BytecodeOperandIdx(3);
   TNode<Context> context = GetContext();
+
+  // =========================================================================
+  // [DTA Pre-Hook] ConstructWithSpread with skip stack
+  // =========================================================================
+  DtaPushSkip(DtaCheckSFITaintSkip(constructor));
+  {
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+    TNode<Int32T> arg_count = Signed(args.reg_count());
+    DtaFillArgTaintBuf(first_reg_idx, arg_count, true);
+    CallPrepareRuntimeArgs(frame_ptr, constructor, UndefinedConstant(), first_reg_idx, arg_count, true);
+  }
+  // =========================================================================
+
   TNode<Object> result =
       ConstructWithSpread(constructor, context, new_target, args, slot_id);
   SetAccumulator(result);
@@ -1721,6 +2284,35 @@ IGNITION_HANDLER(ConstructForwardAllArgs, InterpreterAssembler) {
   TNode<JSAny> constructor = CAST(LoadRegisterAtOperandIndex(0));
   TNode<TaggedIndex> slot_id = BytecodeOperandIdxTaggedIndex(1);
   TNode<Context> context = GetContext();
+
+  // =========================================================================
+  // [DTA Pre-Hook] ConstructForwardAllArgs — forwards current frame's params
+  // to the super constructor. Read taint from shadow frame parameter slots
+  // (written by DtaTransferArgTaintsFromBuf when this function was entered).
+  // =========================================================================
+  DtaPushSkip(DtaCheckSFITaintSkip(constructor));
+  {
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    // First actual parameter (after receiver) operand in shadow frame:
+    constexpr int32_t kFirstArgOperand =
+        interpreter::Register::FromParameterIndex(1).ToOperand();
+    TNode<Int32T> first_reg_idx = Int32Constant(kFirstArgOperand);
+    // Read the actual argument count from the interpreted frame, NOT from
+    // the global taint_arg_count_address. The global was cleared to 0 by
+    // DtaTransferArgTaintsFromBuf when this function entered (the "Consume
+    // and Clear" pattern). The arg taints are already in the shadow frame
+    // parameter slots — we just need the correct count to read them back.
+    // kArgCOffset stores argc INCLUDING receiver; subtract 1 for actual args.
+    TNode<IntPtrT> argc_with_recv = Load<IntPtrT>(
+        frame_ptr, IntPtrConstant(StandardFrameConstants::kArgCOffset));
+    TNode<Int32T> arg_count = TruncateIntPtrToInt32(
+        IntPtrSub(argc_with_recv, IntPtrConstant(kJSArgcReceiverSlots)));
+    DtaFillArgTaintBuf(first_reg_idx, arg_count, true);
+    CallPrepareRuntimeArgs(frame_ptr, constructor, UndefinedConstant(),
+                           first_reg_idx, arg_count, true);
+  }
+  // =========================================================================
+
   TNode<Object> result =
       ConstructForwardAllArgs(constructor, context, new_target, slot_id);
   SetAccumulator(result);
@@ -1741,6 +2333,21 @@ IGNITION_HANDLER(Construct, InterpreterAssembler) {
   TNode<Union<FeedbackVector, Undefined>> maybe_feedback_vector =
       LoadFeedbackVector();
   TNode<Context> context = GetContext();
+
+  // =========================================================================
+  // [DTA Pre-Hook] Phase 3: SFI PIC + Skip Stack (Construct)
+  // =========================================================================
+  DtaPushSkip(DtaCheckSFITaintSkip(constructor));
+  {
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    TNode<Int32T> first_reg_idx = TruncateIntPtrToInt32(BytecodeOperandReg(1));
+    TNode<Int32T> arg_count = Signed(args.reg_count());
+    // Fill arg taint buffer from shadow frame BEFORE the C++ call
+    DtaFillArgTaintBuf(first_reg_idx, arg_count, true);
+    CallPrepareRuntimeArgs(frame_ptr, constructor, UndefinedConstant(), first_reg_idx, arg_count, true);
+  }
+  // =========================================================================
+  
   TNode<Object> result = Construct(constructor, context, new_target, args,
                                    slot_id, maybe_feedback_vector);
   SetAccumulator(result);
@@ -2604,6 +3211,13 @@ IGNITION_HANDLER(CreateArrayFromIterable, InterpreterAssembler) {
   TNode<Context> context = GetContext();
   TNode<Object> result =
       CallBuiltin(Builtin::kIterableToListWithSymbolLookup, context, iterable);
+
+  // [DTA Hook] Copy shadow heap taint from source iterable to new array.
+  // fn(...args, extra) compiles to: CreateArrayFromIterable(args) → StaInArrayLiteral
+  // → CallJSRuntime[reflect_apply]. Without this hook, per-index taint on the
+  // rest params array is lost when copied to the new spread array.
+  CallRuntime(Runtime::kDtaCopyObjectTaint, context, iterable, result);
+
   SetAccumulator(result);
   Dispatch();
 }
@@ -2694,6 +3308,12 @@ IGNITION_HANDLER(CloneObject, InterpreterAssembler) {
 
   TNode<Object> result = CallBuiltin(Builtin::kCloneObjectIC, context, source,
                                      smi_flags, slot, maybe_feedback_vector);
+
+  // [DTA Hook] Copy shadow heap taint from source to cloned object.
+  // CloneObject (...spread) copies all own properties but has no DTA hooks.
+  // Uses Runtime call (not C function) — safe during mksnapshot.
+  CallRuntime(Runtime::kDtaCopyObjectTaint, context, source, result);
+
   SetAccumulator(result);
   Dispatch();
 }
@@ -2789,8 +3409,24 @@ IGNITION_HANDLER(CreateCatchContext, InterpreterAssembler) {
   TNode<Object> exception = LoadRegisterAtOperandIndex(0);
   TNode<ScopeInfo> scope_info = CAST(LoadConstantPoolEntryAtOperandIndex(1));
   TNode<Context> context = GetContext();
-  SetAccumulator(
-      CallRuntime(Runtime::kPushCatchContext, context, exception, scope_info));
+
+  // Read exception register's taint BEFORE the CallRuntime (which may clobber state)
+  TNode<Int32T> exception_reg = TruncateIntPtrToInt32(BytecodeOperandReg(0));
+  TNode<Word32T> exception_taint = InlineGetRegTaint(exception_reg);
+
+  TNode<Object> new_context =
+      CallRuntime(Runtime::kPushCatchContext, context, exception, scope_info);
+  SetAccumulator(new_context);
+
+  // ===========================================================================
+  // [DTA Hook] Store exception taint to catch context's THROWN_OBJECT slot.
+  // Context::THROWN_OBJECT_INDEX == Context::MIN_CONTEXT_SLOTS == 2 on x64.
+  // This bridges heap taint so LdaImmutableCurrentContextSlot reads it back.
+  // ===========================================================================
+  TNode<Smi> thrown_slot = SmiConstant(2);  // Context::THROWN_OBJECT_INDEX
+  CallSetKeyedPropertyTaint(new_context, thrown_slot, exception_taint, Int32Constant(0));
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -2861,6 +3497,8 @@ IGNITION_HANDLER(CreateMappedArguments, InterpreterAssembler) {
   {
     TNode<JSObject> result = EmitFastNewSloppyArguments(context, closure);
     SetAccumulator(result);
+    // [DTA] Bridge parameter taint from shadow frame to arguments object
+    CallRuntime(Runtime::kDtaCreateArgumentsTaint, context, result);
     Dispatch();
   }
 
@@ -2869,6 +3507,8 @@ IGNITION_HANDLER(CreateMappedArguments, InterpreterAssembler) {
     TNode<Object> result =
         CallRuntime(Runtime::kNewSloppyArguments, context, closure);
     SetAccumulator(result);
+    // [DTA] Bridge parameter taint from shadow frame to arguments object
+    CallRuntime(Runtime::kDtaCreateArgumentsTaint, context, result);
     Dispatch();
   }
 }
@@ -2883,6 +3523,8 @@ IGNITION_HANDLER(CreateUnmappedArguments, InterpreterAssembler) {
   TNode<JSObject> result =
       builtins_assembler.EmitFastNewStrictArguments(context, closure);
   SetAccumulator(result);
+  // [DTA] Bridge parameter taint from shadow frame to arguments object
+  CallRuntime(Runtime::kDtaCreateArgumentsTaint, context, result);
   Dispatch();
 }
 
@@ -2896,6 +3538,18 @@ IGNITION_HANDLER(CreateRestParameter, InterpreterAssembler) {
   TNode<JSObject> result =
       builtins_assembler.EmitFastNewRestArguments(context, closure);
   SetAccumulator(result);
+
+  // ===========================================================================
+  // [DTA Hook] Copy argument taints from shadow frame to rest array's
+  // shadow heap entries. rest[j] = actual_arg[formal_count + j].
+  // ===========================================================================
+  {
+    TNode<Smi> formal_count_smi = SmiTag(LoadParameterCountWithoutReceiver());
+    CallRuntime(Runtime::kDtaCreateRestParameterTaint, context,
+                result, formal_count_smi);
+  }
+  // ===========================================================================
+
   Dispatch();
 }
 
@@ -2947,6 +3601,29 @@ IGNITION_HANDLER(Abort, InterpreterAssembler) {
 //
 // Return the value in the accumulator.
 IGNITION_HANDLER(Return, InterpreterAssembler) {
+
+  // ===========================================================================
+  // [DTA Hook] HOF EXTRACT: store callback return taint on return value object.
+  // The C function has its own fast exit (acc_taint==0 → immediate return).
+  // Interpreter overhead is acceptable (~10ns on top of ~100ns/bytecode).
+  // Maglev has an inline fast-path check in DtaDestroyFrame::GenerateCode.
+  // ===========================================================================
+  {
+    TNode<Object> acc = GetAccumulator();
+    TNode<ExternalReference> extract_ref = ExternalConstant(
+        ExternalReference::taint_hof_extract_on_return());
+    CallCFunction(extract_ref, MachineType::AnyTagged(),
+                  std::make_pair(MachineType::AnyTagged(), acc));
+  }
+  // ===========================================================================
+
+  // ===========================================================================
+  // [DTA Hook] 栈帧销毁拦截 (Frame Destruction)
+  // ===========================================================================
+  TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+  CallDestroyFrame(frame_ptr);
+  // ===========================================================================
+
   UpdateInterruptBudgetOnReturn();
   TNode<Object> accumulator = GetAccumulator();
   Return(accumulator);
@@ -3236,6 +3913,8 @@ IGNITION_HANDLER(GetIterator, InterpreterAssembler) {
       CallBuiltin(Builtin::kGetIteratorWithFeedback, context, receiver,
                   load_slot, call_slot, feedback_vector);
   SetAccumulator(iterator);
+  // Note: GetIterator returns the iterator object. Element taint propagation
+  // happens through iterator.next() calls which go through hooked Call paths.
   Dispatch();
 }
 
@@ -3286,6 +3965,19 @@ IGNITION_HANDLER(SuspendGenerator, InterpreterAssembler) {
   TNode<Smi> offset = SmiTag(BytecodeOffset());
   StoreObjectField(generator, JSGeneratorObject::kInputOrDebugPosOffset,
                    offset);
+
+  // ===========================================================================
+  // [DTA Hook] Save shadow frame taint before suspending generator.
+  // Uses shadow_heap keyed by generator address to persist register taints
+  // across yield points. Restored by ResumeGenerator's DTA hook.
+  // ===========================================================================
+  {
+    TNode<Smi> param_count = SmiTag(LoadParameterCountWithoutReceiver());
+    TNode<Smi> reg_count = SmiTag(Signed(ChangeUint32ToWord(registers.reg_count())));
+    CallRuntime(Runtime::kDtaSuspendGeneratorTaint, context,
+                generator, param_count, reg_count);
+  }
+  // ===========================================================================
 
   Return(GetAccumulator());
 }
@@ -3353,7 +4045,224 @@ IGNITION_HANDLER(ResumeGenerator, InterpreterAssembler) {
   SetAccumulator(
       LoadObjectField(generator, JSGeneratorObject::kInputOrDebugPosOffset));
 
+  // ===========================================================================
+  // [DTA Hook] Resume generator: re-register shadow frame and restore taints.
+  //
+  // After await/yield, the generator gets a NEW physical frame pointer
+  // (allocated by ResumeGeneratorTrampoline). The old shadow frame was popped
+  // by Return during SuspendGenerator. We MUST push a new shadow frame with
+  // the new frame_ptr so that GetRegisterTaint can find it later.
+  // ===========================================================================
+  {
+    // 1. Push a new shadow frame for the resumed generator's frame
+    TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+    TNode<ExternalReference> alloc_ref =
+        ExternalConstant(ExternalReference::taint_allocate_shadow_frame());
+    TNode<Int32T> reg_count_i32 =
+        TruncateWordToInt32(ChangeUint32ToWord(registers.reg_count()));
+    CallCFunction(alloc_ref, MachineType::AnyTagged(),
+                  std::make_pair(MachineType::Pointer(), frame_ptr),
+                  std::make_pair(MachineType::Int32(), reg_count_i32));
+
+    // 2. Restore register taints from shadow_heap into the new frame
+    TNode<Context> context = GetContext();
+    TNode<Smi> param_count = SmiTag(LoadParameterCountWithoutReceiver());
+    TNode<Smi> reg_count = SmiTag(Signed(ChangeUint32ToWord(registers.reg_count())));
+    CallRuntime(Runtime::kDtaResumeGeneratorTaint, context,
+                generator, param_count, reg_count);
+  }
+  // ===========================================================================
+
   Dispatch();
+}
+
+IGNITION_HANDLER(TaintBinaryOp, InterpreterAssembler) {
+  // 1. INLINE reads of both operand taints from shadow frame
+  TNode<Word32T> right_taint = InlineGetAccTaint();
+  TNode<IntPtrT> reg_intptr = BytecodeOperandReg(0);
+  TNode<Int32T> reg_idx = TruncateIntPtrToInt32(reg_intptr);
+  TNode<Word32T> left_taint = InlineGetRegTaint(reg_idx);
+
+  // 2. Fast path: if either shadow taint is non-zero, propagate directly
+  Label both_clean(this), need_propagate(this), done(this);
+  TVARIABLE(Word32T, var_left, left_taint);
+  TVARIABLE(Word32T, var_right, right_taint);
+
+  TNode<Word32T> combined = Word32Or(left_taint, right_taint);
+  Branch(Word32Equal(combined, Int32Constant(0)), &both_clean, &need_propagate);
+
+  BIND(&both_clean);
+  {
+    // Shadow frame says both operands are clean. BUT the left operand might
+    // be a heap object with taint in shadow_heap (e.g., callback from builtin
+    // where DtaRestoreArgs couldn't bridge, or ThinString after Flatten).
+    // Consumer-side fallback: check heap taint for the left register value.
+    TNode<Object> left_val = LoadRegisterAtOperandIndex(0);
+    TNode<ExternalReference> heap_taint_fn = ExternalConstant(
+        ExternalReference::taint_get_heap_taint_for_object());
+    TNode<Word32T> heap_left = UncheckedCast<Word32T>(CallCFunction(
+        heap_taint_fn, MachineType::Uint32(),
+        std::make_pair(MachineType::AnyTagged(), left_val)));
+
+    // Also check the accumulator value (right operand)
+    TNode<Object> right_val = GetAccumulator();
+    TNode<Word32T> heap_right = UncheckedCast<Word32T>(CallCFunction(
+        heap_taint_fn, MachineType::Uint32(),
+        std::make_pair(MachineType::AnyTagged(), right_val)));
+
+    TNode<Word32T> heap_combined = Word32Or(heap_left, heap_right);
+    Label truly_clean(this), heap_found(this);
+    Branch(Word32Equal(heap_combined, Int32Constant(0)),
+           &truly_clean, &heap_found);
+
+    BIND(&truly_clean);
+    InlineSetAccTaint(Int32Constant(0));
+    Goto(&done);
+
+    BIND(&heap_found);
+    var_left = heap_left;
+    var_right = heap_right;
+    Goto(&need_propagate);
+  }
+
+  BIND(&need_propagate);
+  {
+    TNode<Int32T> op_token = Signed(BytecodeOperandFlag8(1));
+    TNode<Word32T> result_taint =
+        CallPropagateBinaryOp(var_left.value(), var_right.value(), op_token);
+    InlineSetAccTaint(result_taint);
+  }
+  Goto(&done);
+
+  BIND(&done);
+  Dispatch();
+}
+
+IGNITION_HANDLER(TaintBinaryOpSmi, InterpreterAssembler) {
+  // 1. Left operand taint (in accumulator); right is Smi constant (always clean)
+  TNode<Word32T> left_taint = InlineGetAccTaint();
+
+  // 2. Phase 3 Zero-Check: Smi right is always 0. If left is also 0, skip C++.
+  Label clean(this), need_propagate(this), done(this);
+  Branch(Word32Equal(left_taint, Int32Constant(0)), &clean, &need_propagate);
+
+  BIND(&clean);
+  InlineSetAccTaint(Int32Constant(0));
+  Goto(&done);
+
+  BIND(&need_propagate);
+  {
+    TNode<Int32T> op_token = Signed(BytecodeOperandFlag8(1));
+    TNode<Word32T> result_taint =
+        CallPropagateBinaryOp(left_taint, Int32Constant(0), op_token);
+    InlineSetAccTaint(result_taint);
+  }
+  Goto(&done);
+
+  BIND(&done);
+  Dispatch();
+}
+
+// ==============================================================================
+// [DTA] TaintPostCall
+// 这个字节码由我们魔改的 BytecodeGenerator 发射，专门跟在 Call 字节码后面。
+// 此时原生的 Builtin 已经执行完毕，返回值放在物理累加器中。
+// ==============================================================================
+IGNITION_HANDLER(TaintPostCall, InterpreterAssembler) {
+  // Pop the skip stack entry. Encoding:
+  //   bit 0: skip (SFI taint_skip / builtin bitmap — no pre/post hook needed)
+  //   bit 1: user function (DtaRestoreArgs already consumed the call frame)
+  //   0x03 = both bits: fast skip (Maglev inline / C++ early exit, no cleanup)
+  Label skipped(this), fast_skipped(this), user_func(this), do_posthook(this);
+  TNode<Word32T> entry = DtaPopSkip();
+
+  // Check bit 0: was the pre-hook skipped entirely?
+  GotoIf(Word32And(entry, Int32Constant(0x01)), &skipped);
+  // Check bit 1: was the callee a user JS function?
+  GotoIf(Word32And(entry, Int32Constant(0x02)), &user_func);
+  Goto(&do_posthook);
+
+  BIND(&skipped);
+  // 0x03 has bit 1 set → fast skip (no EnterCallFrame was called, deopt safe).
+  GotoIf(Word32And(entry, Int32Constant(0x02)), &fast_skipped);
+  // 0x01: slow skip → EnterCallFrame was called by Ignition pre-hook, clean up.
+  {
+    TNode<ExternalReference> leave_ref =
+        ExternalConstant(ExternalReference::taint_leave_call_frame_static());
+    CallCFunction(leave_ref, MachineType::AnyTagged());
+  }
+  Goto(&fast_skipped);
+
+  BIND(&fast_skipped);
+  // Both slow-skip and fast-skip: clear accumulator taint.
+  InlineSetAccTaint(Int32Constant(0));
+  Dispatch();
+
+  BIND(&user_func);
+  // The callee was a user JS function. DtaRestoreArgs already consumed and
+  // popped the call frame context. The accumulator taint set by the callee's
+  // Return is the authoritative result — just keep it (no C++ call needed).
+  // This avoids the double-pop bug that corrupted the call stack.
+  Dispatch();
+
+  BIND(&do_posthook);
+  {
+    // Builtin / Host API post-hook: call C++ to settle taint propagation.
+    // The call frame context is still alive — CallApplyCallRuleTaint pops it.
+    TNode<Object> result = GetAccumulator();
+    TNode<ExternalReference> function_ref =
+        ExternalConstant(ExternalReference::taint_apply_call_rule());
+    TNode<Word32T> result_taint = UncheckedCast<Word32T>(CallCFunction(
+        function_ref, MachineType::Uint32(),
+        std::make_pair(MachineType::AnyTagged(), result)));
+    InlineSetAccTaint(result_taint);
+    Dispatch();
+  }
+}
+
+// DtaRestoreArgs
+// [DTA Custom] Phase 4: Push shadow frame (C++), then transfer arg taints
+// from the pre-filled Isolate buffer into callee's param registers (CSA inline).
+IGNITION_HANDLER(DtaRestoreArgs, InterpreterAssembler) {
+  TNode<RawPtrT> frame_ptr = LoadParentFramePointer();
+
+  // 1. C++ call: push shadow frame + leave call context (lightweight)
+  TNode<ExternalReference> push_ref =
+      ExternalConstant(ExternalReference::taint_push_frame_and_leave());
+  CallCFunction(push_ref, MachineType::AnyTagged(),
+                std::make_pair(MachineType::Pointer(), frame_ptr));
+
+  // 2. Check arg_count: if > 0, normal call (pre-hook filled the buffer).
+  //    If == 0, this is a builtin-to-JS callback (no pre-hook ran).
+  //    "Consume and Clear" pattern: DtaTransferArgTaintsFromBuf clears
+  //    arg_count after transfer, so the next callback entry sees 0.
+  {
+    TNode<ExternalReference> count_ref = ExternalConstant(
+        ExternalReference::taint_arg_count_address(isolate()));
+    TNode<Uint8T> count = Load<Uint8T>(count_ref);
+
+    Label has_buf(this), no_buf(this);
+    Branch(Word32Equal(static_cast<TNode<Word32T>>(count),
+                       Int32Constant(0)),
+           &no_buf, &has_buf);
+
+    BIND(&has_buf);
+    // Normal path: transfer from pre-filled buffer (also clears arg_count)
+    DtaTransferArgTaintsFromBuf();
+    Dispatch();
+
+    BIND(&no_buf);
+    // Callback from CSA builtin (.then handler, Array.map, etc.)
+    // Scan frame args for heap taint and bridge to shadow frame.
+    // Uses CallCFunction (not CallRuntime) — safe during mksnapshot.
+    {
+      TNode<ExternalReference> bridge_ref = ExternalConstant(
+          ExternalReference::taint_bridge_callback_heap_taint());
+      CallCFunction(bridge_ref, MachineType::AnyTagged(),
+                    std::make_pair(MachineType::Pointer(), frame_ptr));
+    }
+    Dispatch();
+  }
 }
 
 #undef IGNITION_HANDLER

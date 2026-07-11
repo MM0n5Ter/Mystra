@@ -18,6 +18,7 @@
 #include "src/objects/property-details.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
 #include "src/runtime/runtime.h"
+#include "src/taint/taint-adapter.h"
 
 namespace v8 {
 namespace internal {
@@ -1120,6 +1121,22 @@ RUNTIME_FUNCTION(Runtime_CopyDataProperties) {
   // 2. If source is undefined or null, let keys be an empty List.
   if (IsUndefined(*source, isolate) || IsNull(*source, isolate)) {
     return ReadOnlyRoots(isolate).undefined_value();
+  }
+
+  // [DTA Hook] Bridge shadow heap taint from source to target.
+  // Object spread (...source) copies all enumerable own properties.
+  // Without this hook, the target object has no shadow heap entries,
+  // making it invisible to DeepScanObjectForTaint.
+  if (isolate->taint_engine() && isolate->taint_engine()->IsTrackingActive() &&
+      !IsSmi(*source)) {
+    uintptr_t src_addr = (*source).ptr() & ~static_cast<uintptr_t>(1);
+    uintptr_t tgt_addr = (*target).ptr() & ~static_cast<uintptr_t>(1);
+    // Copy ALL shadow heap entries from source to target
+    // (wildcard keys, Smi keys, property keys — all are relevant)
+    isolate->taint_engine()->CopyAllHeapTaints(src_addr, tgt_addr);
+    if (isolate->taint_engine()->IsObjectTracked(src_addr)) {
+      taint::TaintAdapter::RegisterWeakHandleIfNecessary(isolate, (*target).ptr());
+    }
   }
 
   MAYBE_RETURN(

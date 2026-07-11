@@ -96,6 +96,8 @@
 #include "src/tracing/tracing-category-observer.h"
 #include "src/utils/utils-inl.h"
 
+#include "src/taint/taint-adapter.h"
+
 #ifdef V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-pointer-table.h"
 #endif
@@ -1574,6 +1576,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
     } else {
       src->set_map_word_forwarded(dst, kRelaxedStore);
     }
+    taint::TaintAdapter::MoveHeapTaint(base->heap_->isolate(), src_addr, dst_addr);
   }
 
   EvacuateVisitorBase(Heap* heap, EvacuationAllocator* local_allocator,

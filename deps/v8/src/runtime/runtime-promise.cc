@@ -127,6 +127,17 @@ RUNTIME_FUNCTION(Runtime_PromiseHookAfter) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+// [DTA] FulfillPromise runtime entry — called from Torque FulfillPromise
+// when isolate promise hooks are active (DTA registers a no-op hook).
+// This delegates to JSPromise::Fulfill which contains the DTA taint hook.
+RUNTIME_FUNCTION(Runtime_FulfillPromise) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  DirectHandle<JSPromise> promise = args.at<JSPromise>(0);
+  DirectHandle<Object> value = args.at(1);
+  return *JSPromise::Fulfill(promise, value);
+}
+
 RUNTIME_FUNCTION(Runtime_RejectPromise) {
   HandleScope scope(isolate);
   DCHECK_EQ(3, args.length());

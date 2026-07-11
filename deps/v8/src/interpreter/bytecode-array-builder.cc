@@ -1501,6 +1501,26 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ResumeGenerator(
   return *this;
 }
 
+// Taint tracking.
+BytecodeArrayBuilder& BytecodeArrayBuilder::TaintPostCall() {
+  OutputTaintPostCall();
+  return *this;
+}
+BytecodeArrayBuilder& BytecodeArrayBuilder::TaintBinaryOp(Register reg, int op_token) {
+  // 必须将 reg 和 op_token 传递给宏生成的 Output 函数
+  OutputTaintBinaryOp(reg, op_token);
+  return *this;
+}
+BytecodeArrayBuilder& BytecodeArrayBuilder::TaintBinaryOpSmi(int imm_value, int op_token) {
+  // 必须将 imm_value 和 op_token 传递给宏生成的 Output 函数
+  OutputTaintBinaryOpSmi(imm_value, op_token);
+  return *this;
+}
+BytecodeArrayBuilder& BytecodeArrayBuilder::DtaRestoreArgs() {
+  OutputDtaRestoreArgs();
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::CallProperty(Register callable,
                                                          RegisterList args,
                                                          int feedback_slot) {

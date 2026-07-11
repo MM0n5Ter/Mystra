@@ -35,6 +35,17 @@ enum class IsolateFieldId : uint8_t;
   V(date_cache_stamp, "date_cache_stamp")                                      \
   V(stress_deopt_count, "Isolate::stress_deopt_count_address()")               \
   V(force_slow_path, "Isolate::force_slow_path_address()")                     \
+  V(taint_shadow_acc_address, "Isolate::shadow_acc_taint_address()")           \
+  V(taint_shadow_frame_base_address, "Isolate::shadow_frame_base_address()")   \
+  V(taint_frame_stack_top_address, "TaintEngine::frame_stack_top_")            \
+  V(taint_sentinel_frame_base_address, "TaintEngine::sentinel_frame_base_")   \
+  V(taint_skip_stack_address, "TaintEngine::skip_stack_[]")                    \
+  V(taint_skip_top_address, "TaintEngine::skip_top_")                          \
+  V(taint_builtin_bitmap_ptr_address, "Isolate::dta_builtin_bitmap_ptr()")     \
+  V(taint_runtime_action_table_address, "Isolate::dta_runtime_action_table()") \
+  V(taint_arg_taint_buf_address, "Isolate::dta_arg_taint_buf_address()")       \
+  V(taint_arg_count_address, "Isolate::dta_arg_count_address()")               \
+  V(taint_any_taint_live_address, "Isolate::dta_any_taint_live_address()")     \
   V(isolate_root, "Isolate::isolate_root()")                                   \
   V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
   V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
@@ -479,6 +490,36 @@ enum class IsolateFieldId : uint8_t;
   V(typed_array_and_rab_gsab_typed_array_elements_kind_sizes,                  \
     "TypedArrayAndRabGsabTypedArrayElementsKindSizes")                         \
   V(allocate_buffer, "AllocateBuffer")                                         \
+  /* ===================================================================== */  \
+  /* TaintAdapter                                                          */  \
+  /* ===================================================================== */  \
+  V(taint_get_register_taint, "taint::TaintAdapter::GetRegisterTaint")         \
+  V(taint_set_register_taint, "taint::TaintAdapter::SetRegisterTaint")         \
+  V(taint_get_accumulator_taint, "taint::TaintAdapter::GetAccumulatorTaint")   \
+  V(taint_set_accumulator_taint, "taint::TaintAdapter::SetAccumulatorTaint")   \
+  V(taint_propagate_binary_op, "taint::TaintAdapter::PropagateBinaryOp")       \
+  V(taint_allocate_shadow_frame, "taint::TaintAdapter::AllocateShadowFrame")   \
+  V(taint_destroy_frame, "taint::TaintAdapter::DestroyFrame")                  \
+  V(taint_prepare_runtime_args, "taint::TaintAdapter::CallPrepareRuntimeArgs") \
+  V(taint_prepare_runtime_args_undefined_receiver, "taint::TaintAdapter::CallPrepareRuntimeArgs_UndefinedReceiver") \
+  V(taint_restore_runtime_args, "taint::TaintAdapter::CallRestoreRuntimeArgs") \
+  V(taint_push_frame_and_leave, "taint::TaintAdapter::DtaPushFrameAndLeave")  \
+  V(taint_get_named_property, "taint::TaintAdapter::CallGetNamedPropertyTaint")\
+  V(taint_set_named_property, "taint::TaintAdapter::CallSetNamedPropertyTaint")\
+  V(taint_apply_call_rule, "taint::TaintAdapter::CallApplyCallRuleTaint")      \
+  V(taint_leave_call_frame_static, "taint::TaintAdapter::LeaveCallFrameStatic") \
+  V(taint_maglev_call_pre_hook, "taint::TaintAdapter::DtaMaglevCallPreHook")   \
+  V(taint_prepare_runtime_args_n0, "taint::TaintAdapter::CallPrepareRuntimeArgs_N0") \
+  V(taint_prepare_runtime_args_n1, "taint::TaintAdapter::CallPrepareRuntimeArgs_N1") \
+  V(taint_prepare_runtime_args_n2, "taint::TaintAdapter::CallPrepareRuntimeArgs_N2") \
+  V(taint_prepare_runtime_args_n3, "taint::TaintAdapter::CallPrepareRuntimeArgs_N3") \
+  V(taint_prepare_spread_args, "taint::TaintAdapter::CallPrepareSpreadArgs") \
+  V(taint_bridge_callback_heap_taint, "taint::TaintAdapter::BridgeCallbackHeapTaint") \
+  V(taint_hof_extract_on_return, "taint::TaintAdapter::HofExtractOnReturn") \
+  V(taint_get_heap_taint_for_object, "taint::TaintAdapter::GetHeapTaintForObject") \
+  V(taint_get_effective_taint_for_arg, "taint::TaintAdapter::GetEffectiveTaintForArg") \
+  V(taint_copy_object_taint, "taint::TaintAdapter::CopyObjectTaint") \
+  /* ===================================================================== */  \
   EXTERNAL_REFERENCE_LIST_INTL(V)                                              \
   EXTERNAL_REFERENCE_LIST_SANDBOX(V)                                           \
   EXTERNAL_REFERENCE_LIST_LEAPTIERING(V)                                       \

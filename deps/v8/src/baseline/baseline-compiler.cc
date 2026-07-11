@@ -2442,6 +2442,24 @@ void BaselineCompiler::VisitIllegal() {
   // Not emitted in valid bytecode.
   UNREACHABLE();
 }
+
+void BaselineCompiler::VisitTaintPostCall() {
+  // [Taint MVP] 暂不支持在 Sparkplug 基线编译器中处理污点字节码
+  // UNREACHABLE();
+}
+void BaselineCompiler::VisitTaintBinaryOp() {
+  // [Taint MVP] 暂不支持在 Sparkplug 基线编译器中处理污点字节码
+  // UNREACHABLE();
+}
+void BaselineCompiler::VisitTaintBinaryOpSmi() {
+  // [Taint MVP] 暂不支持在 Sparkplug 基线编译器中处理污点字节码
+  // UNREACHABLE();
+}
+void BaselineCompiler::VisitDtaRestoreArgs() {
+  // [Taint MVP] 暂不支持在 Sparkplug 基线编译器中处理污点字节码
+  // UNREACHABLE();
+}
+
 #define DEBUG_BREAK(Name, ...) \
   void BaselineCompiler::Visit##Name() { UNREACHABLE(); }
 DEBUG_BREAK_BYTECODE_LIST(DEBUG_BREAK)

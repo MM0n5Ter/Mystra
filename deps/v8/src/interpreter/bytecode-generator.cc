@@ -1665,8 +1665,16 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
     // Push a new inner context scope for the function.
     BuildNewLocalActivationContext();
     ContextScope local_function_context(this, closure_scope());
+    // [DTA Fix] DtaRestoreArgs MUST run BEFORE context initialization.
+    // BuildLocalActivationContextInitialization promotes parameters to context
+    // slots (Ldar a0 → StaCurrentContextSlot). Without DtaRestoreArgs first,
+    // shadow_frame[a0] is 0 → context slot gets taint=0 → template literals
+    // and other operations using the context variable see zero taint.
+    // This fixes eval(`template_${tainted}`) in functions (cd-messenger bug).
+    builder()->DtaRestoreArgs();
     BuildLocalActivationContextInitialization();
-    GenerateBytecodeBody();
+    // Pass true: DtaRestoreArgs already emitted, skip in GenerateBytecodeBody
+    GenerateBytecodeBody(true);
   } else {
     GenerateBytecodeBody();
   }
@@ -1681,7 +1689,12 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
   DCHECK(builder()->RemainderOfBlockIsDead());
 }
 
-void BytecodeGenerator::GenerateBytecodeBody() {
+void BytecodeGenerator::GenerateBytecodeBody(bool dta_restore_already_emitted) {
+  // [Taint] Call Prehook — skip if already emitted before context init
+  if (!dta_restore_already_emitted) {
+    builder()->DtaRestoreArgs();
+  }
+
   GenerateBodyPrologue();
 
   if (IsBaseConstructor(function_kind())) {
@@ -4601,6 +4614,9 @@ void BytecodeGenerator::BuildAsyncReturn(int source_position) {
     builder()
         ->MoveRegister(generator_object(), args[0])  // generator
         .StoreAccumulatorInRegister(args[1])         // value
+        // [DTA] Bridge return value taint to outer promise BEFORE resolve.
+        // shadow_acc still holds the return value's taint at this point.
+        .CallRuntime(Runtime::kDtaBridgeAsyncReturn, args.Truncate(2))
         .LoadTrue()
         .StoreAccumulatorInRegister(args[2])  // done
         .CallRuntime(Runtime::kInlineAsyncGeneratorResolve, args);
@@ -4611,6 +4627,8 @@ void BytecodeGenerator::BuildAsyncReturn(int source_position) {
     builder()
         ->MoveRegister(generator_object(), args[0])  // generator
         .StoreAccumulatorInRegister(args[1])         // value
+        // [DTA] Bridge return value taint to outer promise BEFORE resolve.
+        .CallRuntime(Runtime::kDtaBridgeAsyncReturn, args)
         .CallRuntime(Runtime::kInlineAsyncFunctionResolve, args);
   }
 
@@ -5101,6 +5119,7 @@ void BytecodeGenerator::BuildFinalizeIteration(
           RegisterList args(iterator.object());
           builder()->CallProperty(
               method, args, feedback_index(feedback_spec()->AddCallICSlot()));
+          builder()->TaintPostCall();
           if (iterator.type() == IteratorType::kAsync) {
             BuildAwait();
           }
@@ -5700,11 +5719,17 @@ void BytecodeGenerator::VisitCompoundAssignment(CompoundAssignment* expr) {
     builder()->BinaryOperationSmiLiteral(
         binop->op(), expr->value()->AsLiteral()->AsSmiLiteral(),
         feedback_index(slot));
+    // [DTA] Compound assignment with Smi literal (e.g., a += 1)
+    builder()->TaintBinaryOpSmi(
+        expr->value()->AsLiteral()->AsSmiLiteral().value(),
+        static_cast<int>(binop->op()));
   } else {
     Register old_value = register_allocator()->NewRegister();
     builder()->StoreAccumulatorInRegister(old_value);
     VisitForAccumulatorValue(expr->value());
     builder()->BinaryOperation(binop->op(), old_value, feedback_index(slot));
+    // [DTA] Compound assignment (e.g., a += 'y', a -= b)
+    builder()->TaintBinaryOp(old_value, static_cast<int>(binop->op()));
   }
   builder()->SetExpressionPosition(expr);
 
@@ -5953,6 +5978,7 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
           FeedbackSlot slot = feedback_spec()->AddCallICSlot();
           builder()->CallProperty(iterator.next(), iterator_and_input,
                                   feedback_index(slot));
+          builder()->TaintPostCall();
           builder()->Jump(after_switch.New());
         }
 
@@ -6700,6 +6726,9 @@ void BytecodeGenerator::VisitCall(Call* expr) {
     builder()->CallAnyReceiver(
         callee, args, feedback_index(feedback_spec()->AddCallICSlot()));
   }
+  // DTA Post Call
+  // 将在里面拿到precall获取的信息然后hook
+  builder()->TaintPostCall();
 }
 
 void BytecodeGenerator::VisitCallSuper(Call* expr) {
@@ -6785,6 +6814,8 @@ void BytecodeGenerator::VisitCallSuper(Call* expr) {
       // and come up with a better way.
       builder()->Construct(constructor, args_regs, feedback_slot_index);
     }
+    // [DTA Post-Hook] super() construct — same as VisitCallNew
+    builder()->TaintPostCall();
   }
 
   // From here onwards, constructor_then_instance will hold the instance.
@@ -6923,6 +6954,12 @@ void BytecodeGenerator::VisitCallNew(CallNew* expr) {
     DCHECK_EQ(spread_position, CallNew::kNoSpread);
     builder()->Construct(constructor, args, feedback_slot_index);
   }
+  // =========================================================================
+  // [DTA Post-Hook] 
+  // 无论是 Construct 还是 ConstructWithSpread，执行完毕后实例对象都在累加器里。
+  // 直接发射 TaintPostCall，触发 C++ 层的 CallApplyCallRuleTaint 进行生命周期结算。
+  // =========================================================================
+  builder()->TaintPostCall();
 }
 
 void BytecodeGenerator::VisitSuperCallForwardArgs(SuperCallForwardArgs* expr) {
@@ -6947,6 +6984,8 @@ void BytecodeGenerator::VisitSuperCallForwardArgs(SuperCallForwardArgs* expr) {
     int feedback_slot_index = feedback_index(feedback_spec()->AddCallICSlot());
 
     builder()->ConstructForwardAllArgs(constructor, feedback_slot_index);
+    // [DTA Post-Hook] super() forward args construct
+    builder()->TaintPostCall();
   }
 
   // From here onwards, constructor_then_instance holds the instance.
@@ -7529,6 +7568,12 @@ void BytecodeGenerator::VisitArithmeticExpression(BinaryOperation* expr) {
     if (expr->op() == Token::kAdd && IsStringTypeHint(type_hint)) {
       execution_result()->SetResultIsString();
     }
+
+    // --- DTA 插桩 ---
+    // 发射对应的 Smi 优化版污点追踪字节码
+    // 参数 1: Smi 的值 (对应 OperandType::kImm)
+    // 参数 2: Token (对应 OperandType::kFlag8)
+    builder()->TaintBinaryOpSmi(literal.value(), static_cast<int>(expr->op()));
   } else {
     TypeHint lhs_type = VisitForAccumulatorValue(expr->left());
     Register lhs = register_allocator()->NewRegister();
@@ -7541,6 +7586,12 @@ void BytecodeGenerator::VisitArithmeticExpression(BinaryOperation* expr) {
 
     builder()->SetExpressionPosition(expr);
     builder()->BinaryOperation(expr->op(), lhs, feedback_index(slot));
+
+    // --- DTA 插桩 ---
+    // 发射通用污点追踪字节码
+    // 参数 1: 存放左操作数的寄存器 (对应 OperandType::kReg)
+    // 参数 2: Token (对应 OperandType::kFlag8)
+    builder()->TaintBinaryOp(lhs, static_cast<int>(expr->op()));
   }
 }
 
@@ -7555,6 +7606,10 @@ void BytecodeGenerator::VisitNaryArithmeticExpression(NaryOperation* expr) {
       builder()->BinaryOperationSmiLiteral(
           expr->op(), expr->subsequent(i)->AsLiteral()->AsSmiLiteral(),
           feedback_index(feedback_spec()->AddBinaryOpICSlot()));
+      // [DTA] Taint propagation for Smi literal in NaryOperation
+      builder()->TaintBinaryOpSmi(
+          expr->subsequent(i)->AsLiteral()->AsSmiLiteral().value(),
+          static_cast<int>(expr->op()));
     } else {
       Register lhs = register_allocator()->NewRegister();
       builder()->StoreAccumulatorInRegister(lhs);
@@ -7564,6 +7619,8 @@ void BytecodeGenerator::VisitNaryArithmeticExpression(NaryOperation* expr) {
       builder()->BinaryOperation(
           expr->op(), lhs,
           feedback_index(feedback_spec()->AddBinaryOpICSlot()));
+      // [DTA] Taint propagation for each step in NaryOperation
+      builder()->TaintBinaryOp(lhs, static_cast<int>(expr->op()));
     }
   }
 
@@ -7633,6 +7690,7 @@ void BytecodeGenerator::BuildGetIterator(IteratorType hint) {
     //     Let syncIterator be Call(syncMethod, obj)
     builder()->CallProperty(method, RegisterList(obj),
                             feedback_index(feedback_spec()->AddCallICSlot()));
+    builder()->TaintPostCall();
 
     // Return CreateAsyncFromSyncIterator(syncIterator)
     // alias `method` register as it's no longer used
@@ -7687,6 +7745,7 @@ void BytecodeGenerator::BuildIteratorNext(const IteratorRecord& iterator,
   DCHECK(next_result.is_valid());
   builder()->CallProperty(iterator.next(), RegisterList(iterator.object()),
                           feedback_index(feedback_spec()->AddCallICSlot()));
+  builder()->TaintPostCall();
 
   if (iterator.type() == IteratorType::kAsync) {
     BuildAwait();
@@ -7780,6 +7839,8 @@ void BytecodeGenerator::VisitTemplateLiteral(TemplateLiteral* expr) {
       if (last_part_valid) {
         builder()->BinaryOperation(Token::kAdd, last_part,
                                    feedback_index(slot));
+        // [DTA] Taint propagation for template literal part concatenation
+        builder()->TaintBinaryOp(last_part, static_cast<int>(Token::kAdd));
       }
       builder()->StoreAccumulatorInRegister(last_part);
       last_part_valid = true;
@@ -7791,6 +7852,8 @@ void BytecodeGenerator::VisitTemplateLiteral(TemplateLiteral* expr) {
     }
     if (last_part_valid) {
       builder()->BinaryOperation(Token::kAdd, last_part, feedback_index(slot));
+      // [DTA] Taint propagation for template literal substitution concatenation
+      builder()->TaintBinaryOp(last_part, static_cast<int>(Token::kAdd));
     }
     last_part_valid = false;
   }
@@ -7799,6 +7862,8 @@ void BytecodeGenerator::VisitTemplateLiteral(TemplateLiteral* expr) {
     builder()->StoreAccumulatorInRegister(last_part);
     builder()->LoadLiteral(parts.last());
     builder()->BinaryOperation(Token::kAdd, last_part, feedback_index(slot));
+    // [DTA] Taint propagation for template literal final part
+    builder()->TaintBinaryOp(last_part, static_cast<int>(Token::kAdd));
   }
 }
 

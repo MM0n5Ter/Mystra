@@ -15,6 +15,9 @@
 #include "src/objects/feedback-cell.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-function.h"
+#include "src/objects/shared-function-info-inl.h"
+#include "src/interpreter/bytecode-register.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
@@ -875,6 +878,9 @@ void Return::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   __ movq(actual_params_size,
           MemOperand(rbp, StandardFrameConstants::kArgCOffset));
 
+  // [DTA] Shadow frame pop is handled by DtaDestroyFrame node emitted in
+  // VisitReturn (graph builder), which covers both inlined and non-inlined returns.
+
   // Leave the frame.
   __ LeaveFrame(StackFrame::MAGLEV);
 
@@ -891,6 +897,538 @@ void Return::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   // Drop receiver + arguments according to dynamic arguments size.
   __ DropArguments(actual_params_size, r9);
   __ Ret();
+}
+
+// ==========================================================================
+// DTA (Dynamic Taint Analysis) x64 Code Generation
+// ==========================================================================
+
+void DtaShadowRegToAcc::GenerateCode(MaglevAssembler* masm,
+                                     const ProcessingState& state) {
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register base_reg = temps.Acquire();
+  Register taint_reg = temps.Acquire();
+  __ Move(base_reg, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      base_reg));
+  __ movl(taint_reg, Operand(base_reg, reg_operand_ * sizeof(uint32_t)));
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      base_reg), taint_reg);
+}
+
+void DtaShadowAccToReg::GenerateCode(MaglevAssembler* masm,
+                                     const ProcessingState& state) {
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register base_reg = temps.Acquire();
+  Register taint_reg = temps.Acquire();
+  __ movl(taint_reg, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      base_reg));
+  __ Move(base_reg, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      base_reg));
+  __ movl(Operand(base_reg, reg_operand_ * sizeof(uint32_t)), taint_reg);
+}
+
+void DtaShadowRegToReg::GenerateCode(MaglevAssembler* masm,
+                                     const ProcessingState& state) {
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register base_reg = temps.Acquire();
+  Register taint_reg = temps.Acquire();
+  __ Move(base_reg, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      base_reg));
+  __ movl(taint_reg, Operand(base_reg, src_operand_ * sizeof(uint32_t)));
+  __ movl(Operand(base_reg, dst_operand_ * sizeof(uint32_t)), taint_reg);
+}
+
+void DtaTaintBinaryOp::GenerateCode(MaglevAssembler* masm,
+                                    const ProcessingState& state) {
+  // Inline OR zero-check fast path + C++ CreateNode slow path.
+  // Fast: if (shadow_frame[reg] | shadow_acc) == 0 → skip (both clean).
+  // Slow: PropagateBinaryOp(left, right, op_token, result) → new taint node.
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register base_reg = temps.Acquire();
+  Register scratch = temps.Acquire();
+  Label end;
+
+  // Step 1: Load left_taint = shadow_frame[reg_operand_]
+  __ Move(base_reg, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      base_reg));
+  __ movl(scratch, Operand(base_reg, reg_operand_ * sizeof(uint32_t)));
+
+  // Step 2: OR with right_taint = shadow_acc → fast zero-check
+  __ orl(scratch, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      kScratchRegister));
+  __ testl(scratch, scratch);
+  __ j(zero, &end);  // Both clean → skip
+
+  // Step 3 (slow path): Call Runtime to create derived taint node.
+  // Args: result_obj (tagged), reg_operand (Smi), op_token (Smi)
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot());
+    __ Push(ToRegister(result_input()));
+    __ Push(Smi::FromInt(reg_operand_));
+    __ Push(Smi::FromInt(op_token_));
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kDtaPropagateBinaryOp, 3);
+    save_register_state.DefineSafepoint();
+    // rax = Smi(new_taint_id)
+    __ SmiUntag(kReturnRegister0);
+    __ movl(__ ExternalReferenceAsOperand(
+        ExternalReference::taint_shadow_acc_address(masm->isolate()),
+        scratch), kReturnRegister0);
+  }
+
+  __ bind(&end);
+}
+
+void DtaTaintBinaryOpSmi::GenerateCode(MaglevAssembler* masm,
+                                       const ProcessingState& state) {
+  // Smi right operand has taint 0. shadow_acc = shadow_acc | 0 = shadow_acc.
+  // Pure no-op — shadow_acc is already correct. No C++ call needed.
+}
+
+void DtaRestoreArgs::GenerateCode(MaglevAssembler* masm,
+                                  const ProcessingState& state) {
+  // 1. Push shadow frame + set skip stack user-func bit.
+  __ Move(kCArgRegs[0], rbp);
+  {
+    AllowExternalCallThatCantCauseGC scope(masm);
+    __ PrepareCallCFunction(1);
+    __ CallCFunction(ExternalReference::taint_push_frame_and_leave(), 1);
+  }
+  // 2. Inline arg taint transfer: arg_buf[i] → shadow_frame[param_i]
+  //    Mirrors Ignition's CSA DtaTransferArgTaintsFromBuf but in raw x64.
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register count = temps.Acquire();
+  Register dst = temps.Acquire();
+  Register src = temps.Acquire();
+  Label loop, done;
+
+  // Skip the arg-taint transfer entirely when no taint has ever been minted:
+  // the arg taint buffer is all zero, so the copy is a no-op. Same inline latch
+  // gate used by DtaShadowHeapLoad. (The frame push above is structural and
+  // must always run, so it stays outside this guard.)
+  __ movzxbl(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_any_taint_live_address(masm->isolate()),
+      kScratchRegister));
+  __ testl(kScratchRegister, kScratchRegister);
+  __ j(zero, &done);
+
+  // Load arg_count (uint8_t).
+  __ movzxbl(count, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_arg_count_address(masm->isolate()), count));
+  __ testl(count, count);
+  __ j(zero, &done);
+
+  // Load shadow_frame_base_ pointer (double indirection via ExternalRef).
+  __ movq(dst, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      dst));
+  __ testq(dst, dst);
+  __ j(zero, &done);
+
+  // Offset dst to parameter 0 in the shadow frame.
+  // Parameter i lives at shadow_base[kParamOperandBase + i].
+  constexpr int kParamOperandBase =
+      interpreter::Register::FromParameterIndex(0).ToOperand();
+  static_assert(kParamOperandBase > 0,
+                "Parameter operand base must be positive for shadow indexing");
+  __ leaq(dst, Operand(dst, kParamOperandBase * sizeof(uint32_t)));
+
+  // Load arg taint buffer base address.
+  __ Move(src,
+          ExternalReference::taint_arg_taint_buf_address(masm->isolate()));
+
+  // Copy loop: one uint32_t per iteration.
+  __ bind(&loop);
+  __ movl(kScratchRegister, Operand(src, 0));
+  __ movl(Operand(dst, 0), kScratchRegister);
+  __ addq(src, Immediate(sizeof(uint32_t)));
+  __ addq(dst, Immediate(sizeof(uint32_t)));
+  __ decl(count);
+  __ j(not_zero, &loop);
+
+  __ bind(&done);
+}
+
+void DtaDestroyFrame::GenerateCode(MaglevAssembler* masm,
+                                   const ProcessingState& state) {
+  // [DTA HOF EXTRACT] Call HofExtractOnReturn BEFORE popping the shadow frame.
+  // shadow_acc is still valid at this point. The C function checks if the
+  // parent call is an HOF with EXTRACT rules and stores taint on the return
+  // value object. This mirrors the interpreter's Return handler hook.
+  // Note: We pass kReturnRegister0 (rax) which holds the accumulator.
+  // [DTA HOF EXTRACT] Fast path: skip C call if shadow_acc == 0 (99.9% of returns)
+  {
+    Label skip_extract;
+    __ movl(kScratchRegister, __ ExternalReferenceAsOperand(
+        ExternalReference::taint_shadow_acc_address(masm->isolate()),
+        kScratchRegister));
+    __ testl(kScratchRegister, kScratchRegister);
+    __ j(zero, &skip_extract);
+    // Slow path: shadow_acc != 0, call HofExtractOnReturn (GC-safe: no alloc)
+    {
+      AllowExternalCallThatCantCauseGC scope(masm);
+      __ PrepareCallCFunction(1);
+      __ movq(kCArgRegs[0], kReturnRegister0);
+      __ CallCFunction(ExternalReference::taint_hof_extract_on_return(), 1);
+    }
+    __ bind(&skip_extract);
+  }
+
+  // Inline shadow frame pop — mirrors C++ TaintEngine::PopShadowFrame.
+  // Handles sentinel boundary: if (--top <= 0) restore sentinel, else rewind.
+  constexpr int kFrameSlotCount = 512;  // Must match TaintEngine::kFrameSlotCount
+  constexpr int kFrameByteStride = kFrameSlotCount * sizeof(uint32_t);
+  Label sentinel_restore, done;
+
+  // Step 1: Decrement frame_stack_top_ (size_t, 8 bytes).
+  __ movq(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_frame_stack_top_address(masm->isolate()),
+      kScratchRegister));
+  __ subq(kScratchRegister, Immediate(1));
+  __ movq(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_frame_stack_top_address(masm->isolate()),
+      r9), kScratchRegister);
+
+  // Step 2: Boundary check — if new top <= 0, restore sentinel.
+  __ testq(kScratchRegister, kScratchRegister);
+  __ j(less_equal, &sentinel_restore);
+
+  // Step 3a (Normal pop): Rewind shadow_frame_base_ by one frame stride.
+  __ movq(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      kScratchRegister));
+  __ subq(kScratchRegister, Immediate(kFrameByteStride));
+  __ movq(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      r9), kScratchRegister);
+  __ jmp(&done);
+
+  // Step 3b (Sentinel): Restore sentinel_frame_base_ as the active frame.
+  __ bind(&sentinel_restore);
+  __ movq(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_sentinel_frame_base_address(masm->isolate()),
+      kScratchRegister));
+  __ movq(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+      r9), kScratchRegister);
+
+  __ bind(&done);
+}
+
+void DtaTaintPostCall::GenerateCode(MaglevAssembler* masm,
+                                    const ProcessingState& state) {
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register scratch1 = temps.Acquire();
+  Register scratch2 = temps.Acquire();
+  Label skipped, user_func, end;
+
+  // Pop skip stack (skip_top is uint32_t — 32-bit movl)
+  // Guard: if skip_top == 0, treat as untracked (jump to skipped)
+  __ movl(scratch1, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()), scratch1));
+  __ testl(scratch1, scratch1);
+  __ j(zero, &skipped);
+  __ decl(scratch1);
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()), scratch2),
+      scratch1);
+
+  // Load entry from skip_stack[new_top] (direct address, no double deref)
+  __ Move(scratch2, ExternalReference::taint_skip_stack_address(masm->isolate()));
+  __ movzxbl(scratch1, Operand(scratch2, scratch1, times_1, 0));
+
+  __ testl(scratch1, Immediate(0x01));
+  __ j(not_zero, &skipped);
+
+  __ testl(scratch1, Immediate(0x02));
+  __ j(not_zero, &user_func);
+
+  // Builtin post-hook — Runtime call with ExitFrame + GC safepoint.
+  // Uses DeferredCall pattern: SaveRegisterStateForCall protects live regs.
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot());
+    __ Push(ToRegister(acc_value_input()));
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kDtaApplyCallRuleTaint, 1);
+    save_register_state.DefineSafepoint();
+    // rax = Smi(result_taint)
+    __ SmiUntag(kReturnRegister0);
+    __ movl(__ ExternalReferenceAsOperand(
+        ExternalReference::taint_shadow_acc_address(masm->isolate()),
+        scratch1), kReturnRegister0);
+  }
+  __ jmp(&end);
+
+  __ bind(&skipped);
+  {
+    Label fast_skipped;
+    // 0x03 has bit 1 set → fast skip (no EnterCallFrame was called).
+    __ testl(scratch1, Immediate(0x02));
+    __ j(not_zero, &fast_skipped);
+    // 0x01: slow skip → EnterCallFrame was called by C++ prehook, clean up.
+    {
+      AllowExternalCallThatCantCauseGC scope(masm);
+      __ PrepareCallCFunction(0);
+      __ CallCFunction(ExternalReference::taint_leave_call_frame_static(), 0);
+    }
+    __ bind(&fast_skipped);
+  }
+  // Both paths: clear shadow accumulator taint.
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      scratch1), Immediate(0));
+  __ jmp(&end);
+
+  __ bind(&user_func);
+  __ bind(&end);
+}
+
+void DtaCallPreHook::GenerateCode(MaglevAssembler* masm,
+                                  const ProcessingState& state) {
+  Register target = ToRegister(target_input());
+  // No acquired temps — variable inputs may consume all allocatable registers.
+  // Use kScratchRegister (r10, non-allocatable) as primary scratch.
+  // Use a C-arg register that doesn't conflict with target as secondary.
+  Register scratch1 = (target != kCArgRegs[0]) ? kCArgRegs[0] : kCArgRegs[1];
+  Label check_bitmap, fast_skip, smi_runtime, smi_push, slow_path, end;
+
+  // =========================================================================
+  // INLINE TIER 0: Smi Runtime ID (O(1) table lookup, no C++ call)
+  // =========================================================================
+  __ JumpIfSmi(target, &smi_runtime);
+
+  // =========================================================================
+  // INLINE TIER 1: SFI TaintSkipBit (writable SFIs — Node.js APIs, etc.)
+  // =========================================================================
+  __ CmpObjectType(target, JS_FUNCTION_TYPE, scratch1);
+  __ j(not_equal, &slow_path);
+  __ LoadTaggedField(scratch1, target,
+                     JSFunction::kSharedFunctionInfoOffset);
+  __ movl(kScratchRegister,
+          FieldOperand(scratch1, SharedFunctionInfo::kFlagsOffset));
+  __ testl(kScratchRegister, Immediate(static_cast<int32_t>(1u << 31)));
+  __ j(not_zero, &fast_skip);
+
+  // =========================================================================
+  // INLINE TIER 2: Builtin Bitmap (read-only SFIs — Math.abs, Array.push)
+  // =========================================================================
+  __ bind(&check_bitmap);
+  __ LoadTaggedField(kScratchRegister, scratch1,
+                     SharedFunctionInfo::kUntrustedFunctionDataOffset);
+  __ JumpIfNotSmi(kScratchRegister, &slow_path);
+  __ SmiUntag(kScratchRegister);
+  __ testl(kScratchRegister, kScratchRegister);
+  __ j(sign, &slow_path);
+  // Load bitmap pointer.
+  __ movq(scratch1, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_builtin_bitmap_ptr_address(masm->isolate()),
+      scratch1));
+  __ testq(scratch1, scratch1);
+  __ j(zero, &slow_path);
+  __ movzxbl(scratch1, Operand(scratch1, kScratchRegister, times_1, 0));
+  __ testl(scratch1, scratch1);
+  __ j(zero, &slow_path);
+
+  // =========================================================================
+  // FAST SKIP: Push 0x03 to skip stack (shared by Tier 1 + Tier 2)
+  // =========================================================================
+  __ bind(&fast_skip);
+  __ movl(scratch1, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()), scratch1));
+  __ Move(kScratchRegister, ExternalReference::taint_skip_stack_address(masm->isolate()));
+  __ movb(Operand(kScratchRegister, scratch1, times_1, 0), Immediate(0x03));
+  __ incl(scratch1);
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()),
+      kScratchRegister), scratch1);
+  __ jmp(&end);
+
+  // =========================================================================
+  // TIER 0: Smi Runtime ID — three-state O(1) table lookup
+  // =========================================================================
+  __ bind(&smi_runtime);
+  __ SmiUntag(scratch1, target);
+  __ movq(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_runtime_action_table_address(masm->isolate()),
+      kScratchRegister));
+  __ testq(kScratchRegister, kScratchRegister);
+  __ j(zero, &slow_path);
+  __ movzxbl(kScratchRegister, Operand(kScratchRegister, scratch1, times_1, 0));
+  __ testl(kScratchRegister, kScratchRegister);
+  __ j(zero, &slow_path);
+  // kScratchRegister is 0x02 (Preserve) or 0x03 (Untracked) — push directly.
+  __ bind(&smi_push);
+  __ movl(scratch1, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()), scratch1));
+  {
+    Register skip_stack = kCArgRegs[0];  // Temporary use — not live here
+    __ Move(skip_stack, ExternalReference::taint_skip_stack_address(masm->isolate()));
+    __ movb(Operand(skip_stack, scratch1, times_1, 0), kScratchRegister);
+  }
+  __ incl(scratch1);
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_skip_top_address(masm->isolate()),
+      kScratchRegister), scratch1);
+  __ jmp(&end);
+
+  // =========================================================================
+  // SLOW PATH: Runtime call with ExitFrame + GC safepoint.
+  // Variable-input: pushes actual tagged arg ValueNodes for GC-safe access.
+  // =========================================================================
+  __ bind(&slow_path);
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot());
+    // args[0] = target (tagged function)
+    __ Push(target);
+    // args[1] = Smi(prepend_receiver)
+    __ Push(Smi::FromInt(prepend_receiver_));
+    // args[2] = Smi(first_reg_operand) — for shadow frame indexing in C++
+    __ Push(Smi::FromInt(first_reg_operand_));
+    // args[3..N+2] = actual tagged arg ValueNodes (GC-safe via Arguments)
+    for (int i = 0; i < num_args(); i++) {
+      detail::PushInput(masm, arg(i));
+    }
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kDtaMaglevCallPreHook, 3 + num_args());
+    save_register_state.DefineSafepoint();
+  }
+
+  __ bind(&end);
+}
+
+void DtaShadowHeapLoad::GenerateCode(MaglevAssembler* masm,
+                                     const ProcessingState& state) {
+  Label do_query, end;
+
+  // Inline fast path: if no taint has ever been minted (dta_any_taint_live_ ==
+  // 0), the shadow heap is empty, so the loaded property/context-slot value
+  // cannot carry taint. Skip the unconditional C call and clear shadow_acc.
+  // This mirrors the inline zero-check guard the other hot DTA nodes already
+  // have (DtaTaintBinaryOp / DtaShadowHeapStore / DtaBindResultTaint). The
+  // latch is flipped from the TaintEngine node mint, so it is sound for every
+  // taint source (taint() API, source rules, IPC deserialize).
+  __ movzxbl(kScratchRegister, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_any_taint_live_address(masm->isolate()),
+      kScratchRegister));
+  __ testl(kScratchRegister, kScratchRegister);
+  __ j(not_zero, &do_query);
+  // Clean load: result taint is 0 → clear shadow_acc, no C call.
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      kScratchRegister), Immediate(0));
+  __ jmp(&end);
+
+  __ bind(&do_query);
+  // No temporaries needed — use kCArgRegs[0] as scratch after the call
+  __ Move(kCArgRegs[0], ToRegister(object_input()));
+  __ Move(kCArgRegs[1], ToRegister(name_input()));
+  __ Move(kCArgRegs[2], ToRegister(result_input()));
+
+  {
+    AllowExternalCallThatCantCauseGC scope(masm);
+    __ PrepareCallCFunction(3);
+    __ CallCFunction(ExternalReference::taint_get_named_property(), 3);
+  }
+  // kCArgRegs[0] (rdi) is caller-saved, use as scratch for the store
+  __ movl(__ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()),
+      kCArgRegs[0]), kReturnRegister0);
+
+  __ bind(&end);
+}
+
+void DtaBindResultTaint::GenerateCode(MaglevAssembler* masm,
+                                      const ProcessingState& state) {
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
+  Label end;
+
+  // Fast path: if shadow_acc == 0 (clean result), skip entirely.
+  __ movl(scratch, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()), scratch));
+  __ testl(scratch, scratch);
+  __ j(zero, &end);
+
+  // Slow path: tainted result → bind shadow_acc to result object in shadow heap.
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot());
+    __ Push(ToRegister(result_input()));
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kDtaBindResultTaint, 1);
+    save_register_state.DefineSafepoint();
+  }
+
+  __ bind(&end);
+}
+
+void DtaShadowHeapStore::GenerateCode(MaglevAssembler* masm,
+                                      const ProcessingState& state) {
+  // No acquired temps — use kScratchRegister + a safe C-arg register.
+  Register obj_reg = ToRegister(object_input());
+  Register name_reg = ToRegister(name_input());
+  Register scratch = kScratchRegister;
+  Register scratch2 = (obj_reg != kCArgRegs[0] && name_reg != kCArgRegs[0])
+                           ? kCArgRegs[0] : kCArgRegs[1];
+  Label end;
+
+  // Read value taint (shadow_acc)
+  __ movl(scratch, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()), scratch));
+
+  // Read key register taint from shadow frame (if key_reg_operand_ is set)
+  if (key_reg_operand_ >= 0) {
+    // shadow_frame_base[key_reg_operand_]
+    __ movq(scratch2, __ ExternalReferenceAsOperand(
+        ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+        scratch2));
+    __ movl(scratch2, Operand(scratch2, key_reg_operand_ * sizeof(uint32_t)));
+    // Fast path: skip if BOTH value_taint and key_taint are 0
+    __ orl(scratch2, scratch);  // scratch2 = value_taint | key_taint
+    __ testl(scratch2, scratch2);
+    __ j(zero, &end);
+  } else {
+    // No key register — only check value taint
+    __ testl(scratch, scratch);
+    __ j(zero, &end);
+  }
+
+  // Slow path: at least one taint is non-zero.
+  // Re-read value taint (scratch was clobbered by OR)
+  __ movl(scratch, __ ExternalReferenceAsOperand(
+      ExternalReference::taint_shadow_acc_address(masm->isolate()), scratch));
+
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot());
+    __ SmiTag(scratch);
+    // Read key taint for 4th arg
+    Register key_taint_reg = scratch2;
+    if (key_reg_operand_ >= 0) {
+      __ movq(key_taint_reg, __ ExternalReferenceAsOperand(
+          ExternalReference::taint_shadow_frame_base_address(masm->isolate()),
+          key_taint_reg));
+      __ movl(key_taint_reg, Operand(key_taint_reg, key_reg_operand_ * sizeof(uint32_t)));
+      __ SmiTag(key_taint_reg);
+    } else {
+      __ Move(key_taint_reg, Smi::zero());
+    }
+    // Push args: args[0]=object, args[1]=name, args[2]=Smi(value_taint), args[3]=Smi(key_taint)
+    __ Push(ToRegister(object_input()));
+    __ Push(ToRegister(name_input()));
+    __ Push(scratch);
+    __ Push(key_taint_reg);
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kDtaSetNamedPropertyTaint, 4);
+    save_register_state.DefineSafepoint();
+  }
+
+  __ bind(&end);
 }
 
 }  // namespace maglev

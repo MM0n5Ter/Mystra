@@ -34,6 +34,7 @@
 #include "src/torque/runtime-macro-shims.h"
 #include "src/torque/runtime-support.h"
 #include "src/utils/utils.h"
+#include "src/taint/taint-adapter.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -798,6 +799,13 @@ V8_EXPORT_PRIVATE HandleType<String> String::SlowFlatten(
   }
   DCHECK(result->IsFlat());
   DCHECK(cons->IsFlat());
+
+  // [DTA] Migrate heap taint from ConsString to the newly allocated flat string.
+  // SlowFlatten creates a SeqString at a different address — this is NOT a GC move,
+  // so MoveHeapTaint doesn't fire automatically. Guard with IsObjectTracked (O(1)).
+  taint::TaintAdapter::MigrateStringFlattenTaint(
+      isolate, (*cons).ptr(), (*result).ptr());
+
   return result;
 }
 

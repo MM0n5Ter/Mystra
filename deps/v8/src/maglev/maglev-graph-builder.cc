@@ -107,6 +107,36 @@ bool IsSupported(CpuOperation op) {
   }
 }
 
+// ==========================================================================
+// DTA (Dynamic Taint Analysis) Macro Unrolling Helpers
+// These inject DTA shadow heap hooks on BOTH optimized and fallback paths.
+// ==========================================================================
+
+// Like PROCESS_AND_RETURN_IF_DONE but injects a DTA hook before returning.
+#define DTA_PROCESS_AND_RETURN_IF_DONE(result, value_processor, dta_hook_with_result) \
+  do {                                                                     \
+    auto res = (result);                                                   \
+    if (res.IsDone()) {                                                    \
+      ValueNode* _dta_result = nullptr;                                    \
+      if (res.IsDoneWithValue()) {                                         \
+        _dta_result = res.value();                                         \
+        value_processor(_dta_result);                                      \
+      }                                                                    \
+      dta_hook_with_result;                                                \
+      return res.Checked();                                                \
+    }                                                                      \
+  } while (false)
+
+// Like RETURN_IF_DONE but injects a DTA hook before returning.
+#define DTA_RETURN_IF_DONE(result, dta_hook) \
+  do {                                        \
+    auto res = (result);                      \
+    if (res.IsDone()) {                       \
+      dta_hook;                               \
+      return res.Checked();                   \
+    }                                         \
+  } while (false)
+
 class FunctionContextSpecialization final : public AllStatic {
  public:
   static compiler::OptionalContextRef TryToRef(
@@ -2835,6 +2865,11 @@ ReduceResult MaglevGraphBuilder::BuildStringConcat(ValueNode* left,
 
 template <Operation kOperation>
 ReduceResult MaglevGraphBuilder::VisitBinaryOperation() {
+  // [DTA] Capture register operand for inline taint merge — operand 0 of
+  // Add/Sub/etc bytecode is the lhs register (same as TaintBinaryOp's operand).
+  int dta_reg_operand = iterator_.GetRegisterOperand(0).ToOperand();
+  int dta_op_token = static_cast<int>(kOperation);
+
   FeedbackNexus nexus = FeedbackNexusForOperand(1);
   BinaryOperationHint feedback_hint = nexus.GetBinaryOperationFeedback();
   switch (feedback_hint) {
@@ -2849,23 +2884,45 @@ ReduceResult MaglevGraphBuilder::VisitBinaryOperation() {
       auto [allowed_input_type, conversion_type] =
           BinopHintToNodeTypeAndConversionType(feedback_hint);
       if constexpr (BinaryOperationIsBitwiseInt32<kOperation>()) {
-        return BuildTruncatingInt32BinaryOperationNodeForToNumber<kOperation>(
+        auto r = BuildTruncatingInt32BinaryOperationNodeForToNumber<kOperation>(
             allowed_input_type, conversion_type);
+        if (v8_flags.dta_maglev) {
+          AddNewNode<DtaTaintBinaryOp>({GetAccumulator()}, dta_reg_operand, dta_op_token);
+        }
+        return r;
       } else if (feedback_hint == BinaryOperationHint::kSignedSmall) {
         if constexpr (kOperation == Operation::kExponentiate) {
           // Exponentiate never updates the feedback to be a Smi.
           UNREACHABLE();
         } else {
-          return BuildInt32BinaryOperationNode<kOperation>();
+          auto r = BuildInt32BinaryOperationNode<kOperation>();
+          if (v8_flags.dta_maglev) {
+            AddNewNode<DtaTaintBinaryOp>({GetAccumulator()}, dta_reg_operand, dta_op_token);
+          }
+          return r;
         }
       } else {
-        return BuildFloat64BinaryOperationNodeForToNumber<kOperation>(
+        auto r = BuildFloat64BinaryOperationNodeForToNumber<kOperation>(
             allowed_input_type, conversion_type);
+        if (v8_flags.dta_maglev) {
+          AddNewNode<DtaTaintBinaryOp>({GetAccumulator()}, dta_reg_operand, dta_op_token);
+        }
+        return r;
       }
       break;
     }
     case BinaryOperationHint::kString:
       if constexpr (kOperation == Operation::kAdd) {
+        // [DTA] String concat: deopt to Ignition for sound taint tracking.
+        // Root cause: SFI TaintSkipBit (set after warmup) causes the caller's
+        // pre-hook to skip arg buffer fill → DtaRestoreArgs copies zeros →
+        // shadow_frame empty → DtaTaintBinaryOp reads 0. Ignition's
+        // TaintBinaryOp handler is proven correct. After repeated deopts,
+        // V8 marks the function as "don't optimize" → stays in Ignition.
+        if (v8_flags.dta_maglev) {
+          return EmitUnconditionalDeopt(
+              DeoptimizeReason::kInsufficientTypeFeedbackForBinaryOperation);
+        }
         ValueNode* left = LoadRegister(0);
         ValueNode* right = GetAccumulator();
         return BuildStringConcat(left, right);
@@ -2873,6 +2930,10 @@ ReduceResult MaglevGraphBuilder::VisitBinaryOperation() {
       break;
     case BinaryOperationHint::kStringOrStringWrapper:
       if constexpr (kOperation == Operation::kAdd) {
+        if (v8_flags.dta_maglev) {
+          return EmitUnconditionalDeopt(
+              DeoptimizeReason::kInsufficientTypeFeedbackForBinaryOperation);
+        }
         if (broker()
                 ->dependencies()
                 ->DependOnStringWrapperToPrimitiveProtector()) {
@@ -2893,11 +2954,19 @@ ReduceResult MaglevGraphBuilder::VisitBinaryOperation() {
       break;
   }
   BuildGenericBinaryOperationNode<kOperation>();
+  if (v8_flags.dta_maglev) {
+    // Generic path may produce strings — bind taint to result.
+    AddNewNode<DtaTaintBinaryOp>({GetAccumulator()}, dta_reg_operand, dta_op_token);
+    AddNewNode<DtaBindResultTaint>({GetAccumulator()});
+  }
   return ReduceResult::Done();
 }
 
 template <Operation kOperation>
 ReduceResult MaglevGraphBuilder::VisitBinarySmiOperation() {
+  // [DTA] Smi operations: right operand is literal Smi (always clean).
+  int dta_op_token = static_cast<int>(kOperation);
+
   FeedbackNexus nexus = FeedbackNexusForOperand(1);
   BinaryOperationHint feedback_hint = nexus.GetBinaryOperationFeedback();
   switch (feedback_hint) {
@@ -2912,18 +2981,30 @@ ReduceResult MaglevGraphBuilder::VisitBinarySmiOperation() {
       const auto [allowed_input_type, conversion_type] =
           BinopHintToNodeTypeAndConversionType(feedback_hint);
       if constexpr (BinaryOperationIsBitwiseInt32<kOperation>()) {
-        return BuildTruncatingInt32BinarySmiOperationNodeForToNumber<
+        auto r = BuildTruncatingInt32BinarySmiOperationNodeForToNumber<
             kOperation>(allowed_input_type, conversion_type);
+        if (v8_flags.dta_maglev) {
+          AddNewNode<DtaTaintBinaryOpSmi>({}, dta_op_token);
+        }
+        return r;
       } else if (feedback_hint == BinaryOperationHint::kSignedSmall) {
         if constexpr (kOperation == Operation::kExponentiate) {
           // Exponentiate never updates the feedback to be a Smi.
           UNREACHABLE();
         } else {
-          return BuildInt32BinarySmiOperationNode<kOperation>();
+          auto r = BuildInt32BinarySmiOperationNode<kOperation>();
+          if (v8_flags.dta_maglev) {
+            AddNewNode<DtaTaintBinaryOpSmi>({}, dta_op_token);
+          }
+          return r;
         }
       } else {
-        return BuildFloat64BinarySmiOperationNodeForToNumber<kOperation>(
+        auto r = BuildFloat64BinarySmiOperationNodeForToNumber<kOperation>(
             allowed_input_type, conversion_type);
+        if (v8_flags.dta_maglev) {
+          AddNewNode<DtaTaintBinaryOpSmi>({}, dta_op_token);
+        }
+        return r;
       }
       break;
     }
@@ -2936,6 +3017,9 @@ ReduceResult MaglevGraphBuilder::VisitBinarySmiOperation() {
       break;
   }
   BuildGenericBinarySmiOperationNode<kOperation>();
+  if (v8_flags.dta_maglev) {
+    AddNewNode<DtaTaintBinaryOpSmi>({}, dta_op_token);
+  }
   return ReduceResult::Done();
 }
 
@@ -3314,8 +3398,11 @@ ReduceResult MaglevGraphBuilder::VisitCompareOperation() {
 }
 
 ReduceResult MaglevGraphBuilder::VisitLdar() {
-  MoveNodeBetweenRegisters(iterator_.GetRegisterOperand(0),
+  interpreter::Register src = iterator_.GetRegisterOperand(0);
+  MoveNodeBetweenRegisters(src,
                            interpreter::Register::virtual_accumulator());
+  // [DTA] Propagate shadow register taint to shadow accumulator
+  AddNewNode<DtaShadowRegToAcc>({}, src.ToOperand());
   return ReduceResult::Done();
 }
 
@@ -3723,30 +3810,38 @@ ReduceResult MaglevGraphBuilder::VisitLdaContextSlot() {
   ValueNode* context = LoadRegister(0);
   int slot_index = iterator_.GetIndexOperand(1);
   size_t depth = iterator_.GetUnsignedImmediateOperand(2);
+  // [DTA] Resolve context at depth (Maglev caches chain walk via CSE)
+  ValueNode* resolved_ctx = GetContextAtDepth(context, depth);
   BuildLoadContextSlot(context, depth, slot_index, kMutable,
                        ContextKind::kDefault);
+  AddNewNode<DtaShadowHeapLoad>({resolved_ctx, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 ReduceResult MaglevGraphBuilder::VisitLdaScriptContextSlot() {
   ValueNode* context = LoadRegister(0);
   int slot_index = iterator_.GetIndexOperand(1);
   size_t depth = iterator_.GetUnsignedImmediateOperand(2);
+  ValueNode* resolved_ctx = GetContextAtDepth(context, depth);
   BuildLoadContextSlot(context, depth, slot_index, kMutable,
                        ContextKind::kScriptContext);
+  AddNewNode<DtaShadowHeapLoad>({resolved_ctx, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 ReduceResult MaglevGraphBuilder::VisitLdaImmutableContextSlot() {
   ValueNode* context = LoadRegister(0);
   int slot_index = iterator_.GetIndexOperand(1);
   size_t depth = iterator_.GetUnsignedImmediateOperand(2);
+  ValueNode* resolved_ctx = GetContextAtDepth(context, depth);
   BuildLoadContextSlot(context, depth, slot_index, kImmutable,
                        ContextKind::kDefault);
+  AddNewNode<DtaShadowHeapLoad>({resolved_ctx, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 ReduceResult MaglevGraphBuilder::VisitLdaCurrentContextSlot() {
   ValueNode* context = GetContext();
   int slot_index = iterator_.GetIndexOperand(0);
   BuildLoadContextSlot(context, 0, slot_index, kMutable, ContextKind::kDefault);
+  AddNewNode<DtaShadowHeapLoad>({context, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 ReduceResult MaglevGraphBuilder::VisitLdaCurrentScriptContextSlot() {
@@ -3754,6 +3849,7 @@ ReduceResult MaglevGraphBuilder::VisitLdaCurrentScriptContextSlot() {
   int slot_index = iterator_.GetIndexOperand(0);
   BuildLoadContextSlot(context, 0, slot_index, kMutable,
                        ContextKind::kScriptContext);
+  AddNewNode<DtaShadowHeapLoad>({context, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 ReduceResult MaglevGraphBuilder::VisitLdaImmutableCurrentContextSlot() {
@@ -3761,6 +3857,7 @@ ReduceResult MaglevGraphBuilder::VisitLdaImmutableCurrentContextSlot() {
   int slot_index = iterator_.GetIndexOperand(0);
   BuildLoadContextSlot(context, 0, slot_index, kImmutable,
                        ContextKind::kDefault);
+  AddNewNode<DtaShadowHeapLoad>({context, GetSmiConstant(slot_index), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -3768,49 +3865,67 @@ ReduceResult MaglevGraphBuilder::VisitStaContextSlot() {
   ValueNode* context = LoadRegister(0);
   int slot_index = iterator_.GetIndexOperand(1);
   size_t depth = iterator_.GetUnsignedImmediateOperand(2);
-  return BuildStoreContextSlot(context, depth, slot_index, GetAccumulator(),
-                               ContextKind::kDefault);
+  ValueNode* resolved_ctx = GetContextAtDepth(context, depth);
+  auto result = BuildStoreContextSlot(context, depth, slot_index,
+                                      GetAccumulator(), ContextKind::kDefault);
+  // [DTA] Shadow heap store for closure variable
+  AddNewNode<DtaShadowHeapStore>({resolved_ctx, GetSmiConstant(slot_index)});
+  return result;
 }
 ReduceResult MaglevGraphBuilder::VisitStaCurrentContextSlot() {
   ValueNode* context = GetContext();
   int slot_index = iterator_.GetIndexOperand(0);
-  return BuildStoreContextSlot(context, 0, slot_index, GetAccumulator(),
-                               ContextKind::kDefault);
+  auto result = BuildStoreContextSlot(context, 0, slot_index,
+                                      GetAccumulator(), ContextKind::kDefault);
+  AddNewNode<DtaShadowHeapStore>({context, GetSmiConstant(slot_index)});
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitStaScriptContextSlot() {
   ValueNode* context = LoadRegister(0);
   int slot_index = iterator_.GetIndexOperand(1);
   size_t depth = iterator_.GetUnsignedImmediateOperand(2);
-  return BuildStoreContextSlot(context, depth, slot_index, GetAccumulator(),
-                               ContextKind::kScriptContext);
+  ValueNode* resolved_ctx = GetContextAtDepth(context, depth);
+  auto result = BuildStoreContextSlot(context, depth, slot_index,
+                                      GetAccumulator(), ContextKind::kScriptContext);
+  AddNewNode<DtaShadowHeapStore>({resolved_ctx, GetSmiConstant(slot_index)});
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitStaCurrentScriptContextSlot() {
   ValueNode* context = GetContext();
   int slot_index = iterator_.GetIndexOperand(0);
-  return BuildStoreContextSlot(context, 0, slot_index, GetAccumulator(),
-                               ContextKind::kScriptContext);
+  auto result = BuildStoreContextSlot(context, 0, slot_index,
+                                      GetAccumulator(), ContextKind::kScriptContext);
+  AddNewNode<DtaShadowHeapStore>({context, GetSmiConstant(slot_index)});
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitStar() {
-  MoveNodeBetweenRegisters(interpreter::Register::virtual_accumulator(),
-                           iterator_.GetRegisterOperand(0));
+  interpreter::Register dst = iterator_.GetRegisterOperand(0);
+  MoveNodeBetweenRegisters(interpreter::Register::virtual_accumulator(), dst);
+  // [DTA] Propagate shadow accumulator taint to shadow register
+  AddNewNode<DtaShadowAccToReg>({}, dst.ToOperand());
   return ReduceResult::Done();
 }
 #define SHORT_STAR_VISITOR(Name, ...)                                          \
   ReduceResult MaglevGraphBuilder::Visit##Name() {                             \
+    interpreter::Register dst =                                                \
+        interpreter::Register::FromShortStar(interpreter::Bytecode::k##Name);  \
     MoveNodeBetweenRegisters(                                                  \
-        interpreter::Register::virtual_accumulator(),                          \
-        interpreter::Register::FromShortStar(interpreter::Bytecode::k##Name)); \
+        interpreter::Register::virtual_accumulator(), dst);                    \
+    AddNewNode<DtaShadowAccToReg>({}, dst.ToOperand());                        \
     return ReduceResult::Done();                                               \
   }
 SHORT_STAR_BYTECODE_LIST(SHORT_STAR_VISITOR)
 #undef SHORT_STAR_VISITOR
 
 ReduceResult MaglevGraphBuilder::VisitMov() {
-  MoveNodeBetweenRegisters(iterator_.GetRegisterOperand(0),
-                           iterator_.GetRegisterOperand(1));
+  interpreter::Register src = iterator_.GetRegisterOperand(0);
+  interpreter::Register dst = iterator_.GetRegisterOperand(1);
+  MoveNodeBetweenRegisters(src, dst);
+  // [DTA] Propagate shadow register taint without touching accumulator
+  AddNewNode<DtaShadowRegToReg>({}, src.ToOperand(), dst.ToOperand());
   return ReduceResult::Done();
 }
 
@@ -4237,19 +4352,26 @@ ReduceResult MaglevGraphBuilder::VisitStaGlobal() {
 
   const compiler::GlobalAccessFeedback& global_access_feedback =
       access_feedback.AsGlobalAccess();
-  RETURN_IF_DONE(TryBuildGlobalStore(global_access_feedback));
+  // [DTA] Unroll optimized global store
+  {
+    compiler::NameRef name = GetRefOperand<Name>(0);
+    DTA_RETURN_IF_DONE(TryBuildGlobalStore(global_access_feedback),
+                        AddNewNode<DtaShadowHeapStore>({GetContext(), GetConstant(name)}));
 
-  ValueNode* value = GetAccumulator();
-  compiler::NameRef name = GetRefOperand<Name>(0);
-  ValueNode* context = GetContext();
-  AddNewNode<StoreGlobal>({context, value}, name, feedback_source);
-  return ReduceResult::Done();
+    ValueNode* value = GetAccumulator();
+    ValueNode* context = GetContext();
+    AddNewNode<StoreGlobal>({context, value}, name, feedback_source);
+    AddNewNode<DtaShadowHeapStore>({context, GetConstant(name)});
+    return ReduceResult::Done();
+  }
 }
 
 ReduceResult MaglevGraphBuilder::VisitLdaLookupSlot() {
   // LdaLookupSlot <name_index>
   ValueNode* name = GetConstant(GetRefOperand<Name>(0));
   SetAccumulator(BuildCallRuntime(Runtime::kLoadLookupSlot, {name}).value());
+  // [DTA] Shadow heap load for dynamic lookup
+  AddNewNode<DtaShadowHeapLoad>({GetContext(), name, GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -4261,6 +4383,8 @@ ReduceResult MaglevGraphBuilder::VisitLdaLookupContextSlot() {
       GetTaggedIndexConstant(iterator_.GetUnsignedImmediateOperand(2));
   SetAccumulator(
       BuildCallBuiltin<Builtin::kLookupContextTrampoline>({name, depth, slot}));
+  // [DTA] Shadow heap load for context-aware lookup
+  AddNewNode<DtaShadowHeapLoad>({GetContext(), name, GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -4272,6 +4396,8 @@ ReduceResult MaglevGraphBuilder::VisitLdaLookupScriptContextSlot() {
       GetTaggedIndexConstant(iterator_.GetUnsignedImmediateOperand(2));
   SetAccumulator(BuildCallBuiltin<Builtin::kLookupScriptContextTrampoline>(
       {name, depth, slot}));
+  // [DTA] Shadow heap load for script context lookup
+  AddNewNode<DtaShadowHeapLoad>({GetContext(), name, GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -4337,6 +4463,8 @@ ReduceResult MaglevGraphBuilder::VisitLdaLookupGlobalSlot() {
           {name_node, depth, slot});
     }
     SetAccumulator(result);
+    // [DTA] Shadow heap load for global lookup IC path
+    AddNewNode<DtaShadowHeapLoad>({GetContext(), name_node, GetSmiConstant(0)});
     return ReduceResult::Done();
   }
 }
@@ -4416,6 +4544,8 @@ ReduceResult MaglevGraphBuilder::VisitStaLookupSlot() {
   EscapeContext();
   SetAccumulator(
       BuildCallRuntime(StaLookupSlotFunction(flags), {name, value}).value());
+  // [DTA] Shadow heap store for dynamic lookup store
+  AddNewNode<DtaShadowHeapStore>({GetContext(), name});
   return ReduceResult::Done();
 }
 
@@ -7397,12 +7527,15 @@ ReduceResult MaglevGraphBuilder::VisitGetNamedProperty() {
   compiler::NameRef name = GetRefOperand<Name>(1);
   FeedbackSlot slot = GetSlotOperand(2);
   compiler::FeedbackSource feedback_source{feedback(), slot};
-  PROCESS_AND_RETURN_IF_DONE(
-      TryBuildLoadNamedProperty(object, name, feedback_source), SetAccumulator);
-  // Create a generic load in the fallthrough.
+  // [DTA] Unroll optimized path to inject shadow heap load on BOTH paths
+  DTA_PROCESS_AND_RETURN_IF_DONE(
+      TryBuildLoadNamedProperty(object, name, feedback_source), SetAccumulator,
+      if (_dta_result) AddNewNode<DtaShadowHeapLoad>({object, GetConstant(name), _dta_result}));
+  // Fallback: generic load
   ValueNode* context = GetContext();
-  SetAccumulator(
-      AddNewNode<LoadNamedGeneric>({context, object}, name, feedback_source));
+  ValueNode* load_result = AddNewNode<LoadNamedGeneric>({context, object}, name, feedback_source);
+  SetAccumulator(load_result);
+  AddNewNode<DtaShadowHeapLoad>({object, GetConstant(name), load_result});
   return ReduceResult::Done();
 }
 
@@ -7572,6 +7705,8 @@ ReduceResult MaglevGraphBuilder::BuildGetKeyedProperty(
 ReduceResult MaglevGraphBuilder::VisitGetKeyedProperty() {
   // GetKeyedProperty <object> <slot>
   ValueNode* object = LoadRegister(0);
+  // [DTA] Save key before builder overwrites accumulator
+  ValueNode* key = GetAccumulator();
   // TODO(leszeks): We don't need to tag the key if it's an Int32 and a simple
   // monomorphic element load.
   FeedbackSlot slot = GetSlotOperand(1);
@@ -7583,7 +7718,7 @@ ReduceResult MaglevGraphBuilder::VisitGetKeyedProperty() {
   if (processed_feedback->kind() ==
           compiler::ProcessedFeedback::kElementAccess &&
       processed_feedback->AsElementAccess().transition_groups().empty()) {
-    if (auto constant = TryGetConstant(GetAccumulator());
+    if (auto constant = TryGetConstant(key);
         constant.has_value() && constant->IsName()) {
       compiler::NameRef name = constant->AsName();
       if (name.IsUniqueName() && !name.object()->IsArrayIndex()) {
@@ -7593,12 +7728,22 @@ ReduceResult MaglevGraphBuilder::VisitGetKeyedProperty() {
     }
   }
 
-  return BuildGetKeyedProperty(object, feedback_source, *processed_feedback);
+  ReduceResult result = BuildGetKeyedProperty(object, feedback_source,
+                                              *processed_feedback);
+  // [DTA] Shadow heap load — direct-wire result from SSA graph, not virtual accumulator
+  if (result.IsDone()) {
+    ValueNode* keyed_result = result.IsDoneWithValue() ? result.value()
+                              : current_interpreter_frame_.accumulator();
+    AddNewNode<DtaShadowHeapLoad>({object, key, keyed_result});
+  }
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitGetEnumeratedKeyedProperty() {
   // GetEnumeratedKeyedProperty <object> <enum_index> <cache_type> <slot>
   ValueNode* object = LoadRegister(0);
+  // [DTA] Save key before builder overwrites accumulator
+  ValueNode* key = GetAccumulator();
   FeedbackSlot slot = GetSlotOperand(3);
   compiler::FeedbackSource feedback_source{feedback(), slot};
 
@@ -7606,7 +7751,15 @@ ReduceResult MaglevGraphBuilder::VisitGetEnumeratedKeyedProperty() {
       broker()->GetFeedbackForPropertyAccess(
           feedback_source, compiler::AccessMode::kLoad, std::nullopt);
 
-  return BuildGetKeyedProperty(object, feedback_source, processed_feedback);
+  ReduceResult result = BuildGetKeyedProperty(object, feedback_source, processed_feedback);
+  // [DTA] Shadow heap load for for-in property access — same as VisitGetKeyedProperty.
+  // Without this, for-in loops over tainted objects lose taint on loaded values.
+  if (result.IsDone()) {
+    ValueNode* enum_result = result.IsDoneWithValue() ? result.value()
+                             : current_interpreter_frame_.accumulator();
+    AddNewNode<DtaShadowHeapLoad>({object, key, enum_result});
+  }
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitLdaModuleVariable() {
@@ -7631,6 +7784,8 @@ ReduceResult MaglevGraphBuilder::VisitLdaModuleVariable() {
   }
   ValueNode* cell = BuildLoadFixedArrayElement(exports_or_imports, cell_index);
   SetAccumulator(BuildLoadTaggedField(cell, Cell::kValueOffset));
+  // [DTA] Shadow heap load for module variable (cell is the taint carrier)
+  AddNewNode<DtaShadowHeapLoad>({cell, GetSmiConstant(0), GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -7676,6 +7831,8 @@ ReduceResult MaglevGraphBuilder::VisitStaModuleVariable() {
   ValueNode* cell = BuildLoadFixedArrayElement(exports, cell_index);
   BuildStoreTaggedField(cell, GetAccumulator(), Cell::kValueOffset,
                         StoreTaggedMode::kDefault);
+  // [DTA] Shadow heap store for module variable
+  AddNewNode<DtaShadowHeapStore>({cell, GetSmiConstant(0)});
   return ReduceResult::Done();
 }
 
@@ -7692,12 +7849,15 @@ ReduceResult MaglevGraphBuilder::BuildLoadGlobal(
 
   const compiler::GlobalAccessFeedback& global_access_feedback =
       access_feedback.AsGlobalAccess();
-  PROCESS_AND_RETURN_IF_DONE(TryBuildGlobalLoad(global_access_feedback),
-                             SetAccumulator);
+  // [DTA] Unroll optimized global load to inject shadow heap lookup
+  DTA_PROCESS_AND_RETURN_IF_DONE(TryBuildGlobalLoad(global_access_feedback),
+                                  SetAccumulator,
+                                  if (_dta_result) AddNewNode<DtaShadowHeapLoad>({GetContext(), GetConstant(name), _dta_result}));
 
   ValueNode* context = GetContext();
-  SetAccumulator(
-      AddNewNode<LoadGlobal>({context}, name, feedback_source, typeof_mode));
+  ValueNode* global_result = AddNewNode<LoadGlobal>({context}, name, feedback_source, typeof_mode);
+  SetAccumulator(global_result);
+  AddNewNode<DtaShadowHeapLoad>({context, GetConstant(name), global_result});
   return ReduceResult::Done();
 }
 
@@ -7717,6 +7877,8 @@ ReduceResult MaglevGraphBuilder::VisitSetNamedProperty() {
     ValueNode* value = GetAccumulator();
     AddNewNode<SetNamedGeneric>({context, object, value}, name,
                                 feedback_source);
+    // [DTA] Shadow heap store on fallback path
+    AddNewNode<DtaShadowHeapStore>({object, GetConstant(name)});
     return ReduceResult::Done();
   };
 
@@ -7726,9 +7888,11 @@ ReduceResult MaglevGraphBuilder::VisitSetNamedProperty() {
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess);
 
     case compiler::ProcessedFeedback::kNamedAccess:
-      RETURN_IF_DONE(TryBuildNamedAccess(
+      // [DTA] Unroll optimized path to inject shadow heap store
+      DTA_RETURN_IF_DONE(TryBuildNamedAccess(
           object, object, processed_feedback.AsNamedAccess(), feedback_source,
-          compiler::AccessMode::kStore, build_generic_access));
+          compiler::AccessMode::kStore, build_generic_access),
+          AddNewNode<DtaShadowHeapStore>({object, GetConstant(name)}));
       break;
     default:
       break;
@@ -7754,6 +7918,8 @@ ReduceResult MaglevGraphBuilder::VisitDefineNamedOwnProperty() {
     ValueNode* value = GetAccumulator();
     AddNewNode<DefineNamedOwnGeneric>({context, object, value}, name,
                                       feedback_source);
+    // [DTA] Shadow heap store on fallback path
+    AddNewNode<DtaShadowHeapStore>({object, GetConstant(name)});
     return ReduceResult::Done();
   };
   switch (processed_feedback.kind()) {
@@ -7762,9 +7928,11 @@ ReduceResult MaglevGraphBuilder::VisitDefineNamedOwnProperty() {
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess);
 
     case compiler::ProcessedFeedback::kNamedAccess:
-      RETURN_IF_DONE(TryBuildNamedAccess(
+      // [DTA] Unroll optimized path
+      DTA_RETURN_IF_DONE(TryBuildNamedAccess(
           object, object, processed_feedback.AsNamedAccess(), feedback_source,
-          compiler::AccessMode::kDefine, build_generic_access));
+          compiler::AccessMode::kDefine, build_generic_access),
+          AddNewNode<DtaShadowHeapStore>({object, GetConstant(name)}));
       break;
 
     default:
@@ -7778,6 +7946,9 @@ ReduceResult MaglevGraphBuilder::VisitDefineNamedOwnProperty() {
 ReduceResult MaglevGraphBuilder::VisitSetKeyedProperty() {
   // SetKeyedProperty <object> <key> <slot>
   ValueNode* object = LoadRegister(0);
+  // [DTA] Save key for shadow heap store
+  ValueNode* key_for_dta = current_interpreter_frame_.get(
+      iterator_.GetRegisterOperand(1));
   FeedbackSlot slot = GetSlotOperand(2);
   compiler::FeedbackSource feedback_source{feedback(), slot};
 
@@ -7785,11 +7956,14 @@ ReduceResult MaglevGraphBuilder::VisitSetKeyedProperty() {
       broker()->GetFeedbackForPropertyAccess(
           feedback_source, compiler::AccessMode::kStore, std::nullopt);
 
-  auto build_generic_access = [this, object, &feedback_source]() {
+  int key_reg_op = iterator_.GetRegisterOperand(1).ToOperand();
+  auto build_generic_access = [this, object, key_for_dta, key_reg_op, &feedback_source]() {
     ValueNode* key = LoadRegister(1);
     ValueNode* context = GetContext();
     ValueNode* value = GetAccumulator();
     AddNewNode<SetKeyedGeneric>({context, object, key, value}, feedback_source);
+    // [DTA] Shadow heap store with key register operand for proto pollution check
+    AddNewNode<DtaShadowHeapStore>({object, key_for_dta}, key_reg_op);
     return ReduceResult::Done();
   };
 
@@ -7799,20 +7973,19 @@ ReduceResult MaglevGraphBuilder::VisitSetKeyedProperty() {
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericKeyedAccess);
 
     case compiler::ProcessedFeedback::kElementAccess: {
-      // Get the key without conversion. TryBuildElementAccess will try to pick
-      // the best representation.
       ValueNode* index =
           current_interpreter_frame_.get(iterator_.GetRegisterOperand(1));
-      RETURN_IF_DONE(TryBuildElementAccess(
+      // [DTA] Unroll optimized element access path
+      DTA_RETURN_IF_DONE(TryBuildElementAccess(
           object, index, processed_feedback.AsElementAccess(), feedback_source,
-          build_generic_access));
+          build_generic_access),
+          AddNewNode<DtaShadowHeapStore>({object, key_for_dta}));
     } break;
 
     default:
       break;
   }
 
-  // Create a generic store in the fallthrough.
   return build_generic_access();
 }
 
@@ -7831,6 +8004,8 @@ ReduceResult MaglevGraphBuilder::VisitDefineKeyedOwnProperty() {
   ValueNode* value = GetAccumulator();
   AddNewNode<DefineKeyedOwnGeneric>({context, object, key, value, flags},
                                     feedback_source);
+  // [DTA] Shadow heap store (no optimized path)
+  AddNewNode<DtaShadowHeapStore>({object, key});
   return ReduceResult::Done();
 }
 
@@ -7850,6 +8025,8 @@ ReduceResult MaglevGraphBuilder::VisitStaInArrayLiteral() {
     ValueNode* value = GetAccumulator();
     AddNewNode<StoreInArrayLiteralGeneric>({context, object, index, value},
                                            feedback_source);
+    // [DTA] Shadow heap store on fallback
+    AddNewNode<DtaShadowHeapStore>({object, index});
     return ReduceResult::Done();
   };
 
@@ -7859,9 +8036,11 @@ ReduceResult MaglevGraphBuilder::VisitStaInArrayLiteral() {
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericKeyedAccess);
 
     case compiler::ProcessedFeedback::kElementAccess: {
-      RETURN_IF_DONE(TryBuildElementAccess(
+      // [DTA] Unroll optimized element access
+      DTA_RETURN_IF_DONE(TryBuildElementAccess(
           object, index, processed_feedback.AsElementAccess(), feedback_source,
-          build_generic_access));
+          build_generic_access),
+          AddNewNode<DtaShadowHeapStore>({object, index}));
       break;
     }
 
@@ -7869,7 +8048,6 @@ ReduceResult MaglevGraphBuilder::VisitStaInArrayLiteral() {
       break;
   }
 
-  // Create a generic store in the fallthrough.
   return build_generic_access();
 }
 
@@ -7880,8 +8058,11 @@ ReduceResult MaglevGraphBuilder::VisitDefineKeyedOwnPropertyInLiteral() {
   ValueNode* flags = GetSmiConstant(GetFlag8Operand(2));
   ValueNode* slot = GetTaggedIndexConstant(GetSlotOperand(3).ToInt());
   ValueNode* feedback_vector = GetConstant(feedback());
-  return BuildCallRuntime(Runtime::kDefineKeyedOwnPropertyInLiteral,
+  auto result = BuildCallRuntime(Runtime::kDefineKeyedOwnPropertyInLiteral,
                           {object, name, value, flags, feedback_vector, slot});
+  // [DTA] Shadow heap store (runtime call, no optimized path)
+  AddNewNode<DtaShadowHeapStore>({object, name});
+  return result;
 }
 
 ReduceResult MaglevGraphBuilder::VisitAdd() {
@@ -11282,6 +11463,21 @@ ReduceResult MaglevGraphBuilder::BuildCallFromRegisterList(
   FeedbackSlot slot = GetSlotOperand(3);
   compiler::FeedbackSource feedback_source(feedback(), slot);
   CallArguments args(receiver_mode, reg_list, current_interpreter_frame_);
+  // [DTA] Pre-hook: variable-input with actual arg ValueNodes (GC-safe)
+  {
+    int prepend = (receiver_mode == ConvertReceiverMode::kNullOrUndefined) ? 1 : 0;
+    int first_reg_op = reg_list.first_register().ToOperand();
+    int total_inputs = 1 + reg_list.register_count();  // target + args
+    AddNewNode<DtaCallPreHook>(
+        total_inputs,
+        [&](DtaCallPreHook* node) {
+          node->set_input(DtaCallPreHook::kTargetIndex, GetTaggedValue(target));
+          for (int i = 0; i < reg_list.register_count(); i++) {
+            node->set_arg(i, GetTaggedValue(reg_list[i]));
+          }
+        },
+        first_reg_op, prepend);
+  }
   return BuildCallWithFeedback(target, args, feedback_source);
 }
 
@@ -11291,6 +11487,21 @@ ReduceResult MaglevGraphBuilder::BuildCallFromRegisters(
   const int receiver_count =
       (receiver_mode == ConvertReceiverMode::kNullOrUndefined) ? 0 : 1;
   const int reg_count = arg_count + receiver_count;
+  // [DTA] Pre-hook: variable-input with actual arg ValueNodes (GC-safe)
+  {
+    int first_reg_op = (reg_count > 0) ? iterator_.GetRegisterOperand(1).ToOperand() : 0;
+    int prepend = (receiver_mode == ConvertReceiverMode::kNullOrUndefined) ? 1 : 0;
+    int total_inputs = 1 + reg_count;  // target + args
+    AddNewNode<DtaCallPreHook>(
+        total_inputs,
+        [&](DtaCallPreHook* node) {
+          node->set_input(DtaCallPreHook::kTargetIndex, GetTaggedValue(target));
+          for (int i = 0; i < reg_count; i++) {
+            node->set_arg(i, GetTaggedValue(iterator_.GetRegisterOperand(1 + i)));
+          }
+        },
+        first_reg_op, prepend);
+  }
   FeedbackSlot slot = GetSlotOperand(reg_count + 1);
   compiler::FeedbackSource feedback_source(feedback(), slot);
   switch (reg_count) {
@@ -11352,12 +11563,31 @@ ReduceResult MaglevGraphBuilder::VisitCallWithSpread() {
   compiler::FeedbackSource feedback_source(feedback(), slot);
   CallArguments args(ConvertReceiverMode::kAny, reglist,
                      current_interpreter_frame_, CallArguments::kWithSpread);
+  // [DTA] Pre-hook for spread calls: variable-input with actual arg ValueNodes
+  {
+    int first_reg_op = reglist.first_register().ToOperand();
+    int total_inputs = 1 + reglist.register_count();
+    AddNewNode<DtaCallPreHook>(
+        total_inputs,
+        [&](DtaCallPreHook* node) {
+          node->set_input(DtaCallPreHook::kTargetIndex, GetTaggedValue(function));
+          for (int i = 0; i < reglist.register_count(); i++) {
+            node->set_arg(i, GetTaggedValue(reglist[i]));
+          }
+        },
+        first_reg_op, 0);
+  }
   return BuildCallWithFeedback(function, args, feedback_source);
 }
 
 ReduceResult MaglevGraphBuilder::VisitCallRuntime() {
   Runtime::FunctionId function_id = iterator_.GetRuntimeIdOperand(0);
   interpreter::RegisterList args = iterator_.GetRegisterListOperand(1);
+  // [DTA] NOTE: No DtaCallPreHook here. CallRuntime has no matching
+  // TaintPostCall in the bytecode stream — the Ignition CallRuntime handler
+  // manages EnterCallFrame/LeaveCallFrame internally (not via skip stack).
+  // Emitting DtaCallPreHook would push to skip stack without a pop, causing
+  // skip stack overflow and SIGSEGV after ~700 eval() iterations.
   ValueNode* context = GetContext();
   size_t input_count = args.register_count() + CallRuntime::kFixedInputCount;
   CallRuntime* call_runtime = AddNewNode<CallRuntime>(
@@ -12021,6 +12251,20 @@ ReduceResult MaglevGraphBuilder::VisitConstruct() {
   compiler::FeedbackSource feedback_source{feedback(), slot};
   CallArguments args(ConvertReceiverMode::kNullOrUndefined, reg_list,
                      current_interpreter_frame_);
+  // [DTA] Pre-hook for Construct: variable-input with actual arg ValueNodes
+  {
+    int first_reg_op = reg_list.first_register().ToOperand();
+    int total_inputs = 1 + reg_list.register_count();
+    AddNewNode<DtaCallPreHook>(
+        total_inputs,
+        [&](DtaCallPreHook* node) {
+          node->set_input(DtaCallPreHook::kTargetIndex, GetTaggedValue(target));
+          for (int i = 0; i < reg_list.register_count(); i++) {
+            node->set_arg(i, GetTaggedValue(reg_list[i]));
+          }
+        },
+        first_reg_op, 1);
+  }
   return BuildConstruct(target, new_target, args, feedback_source);
 }
 
@@ -12028,6 +12272,20 @@ ReduceResult MaglevGraphBuilder::VisitConstructWithSpread() {
   ValueNode* new_target = GetAccumulator();
   ValueNode* constructor = LoadRegister(0);
   interpreter::RegisterList args = iterator_.GetRegisterListOperand(1);
+  // [DTA] Pre-hook for ConstructWithSpread: variable-input with actual arg ValueNodes
+  {
+    int first_reg_op = args.first_register().ToOperand();
+    int total_inputs = 1 + args.register_count();
+    AddNewNode<DtaCallPreHook>(
+        total_inputs,
+        [&](DtaCallPreHook* node) {
+          node->set_input(DtaCallPreHook::kTargetIndex, GetTaggedValue(constructor));
+          for (int i = 0; i < args.register_count(); i++) {
+            node->set_arg(i, GetTaggedValue(args[i]));
+          }
+        },
+        first_reg_op, 1);
+  }
   ValueNode* context = GetContext();
   FeedbackSlot slot = GetSlotOperand(3);
   compiler::FeedbackSource feedback_source(feedback(), slot);
@@ -13736,16 +13994,19 @@ ReduceResult MaglevGraphBuilder::VisitCreateMappedArguments() {
          (!is_inline() && CanAllocateSloppyArgumentElements()))) {
       SetAccumulator(BuildAndAllocateArgumentsObject<
                      CreateArgumentsType::kMappedArguments>());
+      (void)BuildCallRuntime(Runtime::kDtaCreateArgumentsTaint, {GetAccumulator()});
       return ReduceResult::Done();
     } else if (!is_inline()) {
       SetAccumulator(
           BuildCallBuiltin<Builtin::kFastNewSloppyArguments>({GetClosure()}));
+      (void)BuildCallRuntime(Runtime::kDtaCreateArgumentsTaint, {GetAccumulator()});
       return ReduceResult::Done();
     }
   }
   // Generic fallback.
   SetAccumulator(
       BuildCallRuntime(Runtime::kNewSloppyArguments, {GetClosure()}).value());
+  (void)BuildCallRuntime(Runtime::kDtaCreateArgumentsTaint, {GetAccumulator()});
   return ReduceResult::Done();
 }
 
@@ -13753,11 +14014,13 @@ ReduceResult MaglevGraphBuilder::VisitCreateUnmappedArguments() {
   if (!is_inline() || CanAllocateInlinedArgumentElements()) {
     SetAccumulator(BuildAndAllocateArgumentsObject<
                    CreateArgumentsType::kUnmappedArguments>());
+    (void)BuildCallRuntime(Runtime::kDtaCreateArgumentsTaint, {GetAccumulator()});
     return ReduceResult::Done();
   }
   // Generic fallback.
   SetAccumulator(
       BuildCallRuntime(Runtime::kNewStrictArguments, {GetClosure()}).value());
+  (void)BuildCallRuntime(Runtime::kDtaCreateArgumentsTaint, {GetAccumulator()});
   return ReduceResult::Done();
 }
 
@@ -14760,6 +15023,11 @@ ReduceResult MaglevGraphBuilder::VisitReturn() {
                                                relative_jump_bytecode_offset);
   }
 
+  // [DTA] Pop shadow frame — must happen for BOTH inlined and non-inlined
+  // returns, since DtaRestoreArgs at entry pushes a frame for both cases.
+  // HOF EXTRACT is called inside DtaDestroyFrame BEFORE the pop.
+  AddNewNode<DtaDestroyFrame>({});
+
   if (!is_inline()) {
     FinishBlock<Return>({GetAccumulator()});
     return ReduceResult::Done();
@@ -15085,4 +15353,24 @@ DEBUG_BREAK_BYTECODE_LIST(DEBUG_BREAK)
 #undef DEBUG_BREAK
 ReduceResult MaglevGraphBuilder::VisitIllegal() { UNREACHABLE(); }
 
+ReduceResult MaglevGraphBuilder::VisitTaintPostCall() {
+  // [DTA] Post-call: pop skip stack, 3-way branch, apply taint rules
+  ValueNode* acc_value = GetAccumulator();
+  AddNewNode<DtaTaintPostCall>({acc_value});
+  return ReduceResult::Done();
+}
+ReduceResult MaglevGraphBuilder::VisitTaintBinaryOp() {
+  // [DTA] No-op: taint merge + heap binding now emitted inside
+  // VisitBinaryOperation, co-located with the specialized binary op node.
+  return ReduceResult::Done();
+}
+ReduceResult MaglevGraphBuilder::VisitTaintBinaryOpSmi() {
+  // [DTA] No-op: taint preserved inside VisitBinarySmiOperation.
+  return ReduceResult::Done();
+}
+ReduceResult MaglevGraphBuilder::VisitDtaRestoreArgs() {
+  // [DTA] Function entry: push shadow frame + transfer arg taints
+  AddNewNode<DtaRestoreArgs>({});
+  return ReduceResult::Done();
+}
 }  // namespace v8::internal::maglev

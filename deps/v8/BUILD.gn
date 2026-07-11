@@ -3325,6 +3325,12 @@ v8_header_set("v8_internal_headers") {
     "include/v8-metrics.h",
     "include/v8-unwinder-state.h",
     "include/v8-wasm-trap-handler-posix.h",
+    "src/taint/taint-core.h",
+    "src/taint/taint-adapter.h",
+    "src/taint/taint-interpreter.h",
+    "src/taint/taint-compiler.h",
+    "src/taint/taint-logger.h",
+    "src/api/v8-taint.h",
     "src/api/api-arguments-inl.h",
     "src/api/api-arguments.h",
     "src/api/api-inl.h",
@@ -5334,6 +5340,13 @@ v8_source_set("v8_base_without_compiler") {
 
   sources = [
     ### gcmole(all) ###
+    "src/runtime/runtime-taint.cc",
+    "src/taint/taint-core.cc",
+    "src/taint/taint-adapter.cc",
+    "src/taint/taint-interpreter.cc",
+    "src/taint/taint-compiler.cc",
+    "src/taint/taint-api.cc",
+    "src/taint/taint-logger.cc",
     "src/api/api-arguments.cc",
     "src/api/api-natives.cc",
     "src/api/api.cc",

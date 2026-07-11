@@ -15,6 +15,8 @@
 #include "src/interpreter/interpreter.h"
 #include "src/objects/objects-inl.h"
 
+#include "src/codegen/external-reference.h"
+
 namespace v8 {
 namespace internal {
 namespace interpreter {
@@ -224,6 +226,601 @@ TNode<IntPtrT> InterpreterAssembler::RegisterFrameOffset(TNode<IntPtrT> index) {
   return TimesSystemPointerSize(index);
 }
 
+// =====================================================================
+// INLINE Shadow Accumulator / Register Access (Zero C-call fast path)
+// =====================================================================
+
+TNode<Word32T> InterpreterAssembler::InlineGetAccTaint() {
+  // Load the shadow accumulator taint directly from Isolate field
+  TNode<ExternalReference> acc_addr =
+      ExternalConstant(ExternalReference::taint_shadow_acc_address(isolate()));
+  return Load<Uint32T>(acc_addr);
+}
+
+void InterpreterAssembler::InlineSetAccTaint(TNode<Word32T> taint_id) {
+  // Store the shadow accumulator taint directly to Isolate field
+  TNode<ExternalReference> acc_addr =
+      ExternalConstant(ExternalReference::taint_shadow_acc_address(isolate()));
+  StoreNoWriteBarrier(MachineRepresentation::kWord32, acc_addr, taint_id);
+}
+
+TNode<Word32T> InterpreterAssembler::InlineGetRegTaint(TNode<Int32T> reg_idx) {
+  // 1. Load shadow_frame_base_ pointer from Isolate
+  TNode<ExternalReference> base_ptr_addr =
+      ExternalConstant(ExternalReference::taint_shadow_frame_base_address(isolate()));
+  TNode<RawPtrT> shadow_base = Load<RawPtrT>(base_ptr_addr);
+
+  // 2. Compute address: shadow_base + reg_idx * 4
+  TNode<IntPtrT> byte_offset = IntPtrMul(
+      ChangeInt32ToIntPtr(reg_idx), IntPtrConstant(sizeof(uint32_t)));
+
+  // 3. Load the taint value
+  return Load<Uint32T>(shadow_base, byte_offset);
+}
+
+void InterpreterAssembler::InlineSetRegTaint(TNode<Int32T> reg_idx,
+                                              TNode<Word32T> taint_id) {
+  // 1. Load shadow_frame_base_ pointer from Isolate
+  TNode<ExternalReference> base_ptr_addr =
+      ExternalConstant(ExternalReference::taint_shadow_frame_base_address(isolate()));
+  TNode<RawPtrT> shadow_base = Load<RawPtrT>(base_ptr_addr);
+
+  // 2. Compute address: shadow_base + reg_idx * 4
+  TNode<IntPtrT> byte_offset = IntPtrMul(
+      ChangeInt32ToIntPtr(reg_idx), IntPtrConstant(sizeof(uint32_t)));
+
+  // 3. Store the taint value
+  StoreNoWriteBarrier(MachineRepresentation::kWord32, shadow_base,
+                      byte_offset, taint_id);
+}
+
+// =====================================================================
+// Skip Stack + SFI PIC for function call bypass
+// =====================================================================
+
+void InterpreterAssembler::DtaPushSkip(TNode<BoolT> should_skip) {
+  TNode<ExternalReference> top_ref =
+      ExternalConstant(ExternalReference::taint_skip_top_address(isolate()));
+  TNode<ExternalReference> stack_ref =
+      ExternalConstant(ExternalReference::taint_skip_stack_address(isolate()));
+
+  TNode<Uint32T> top = Load<Uint32T>(top_ref);
+
+  // Direct address — no dereference needed (address IS the array base)
+  TNode<RawPtrT> stack_base = ReinterpretCast<RawPtrT>(stack_ref);
+  TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(top));
+  StoreNoWriteBarrier(MachineRepresentation::kWord8, stack_base, offset,
+                      ReinterpretCast<Uint8T>(should_skip));
+
+  // Increment top (uint32_t)
+  TNode<Word32T> new_push_top = UncheckedCast<Word32T>(
+      Int32Add(UncheckedCast<Int32T>(top), Int32Constant(1)));
+  StoreNoWriteBarrier(MachineRepresentation::kWord32, top_ref, new_push_top);
+}
+
+TNode<Word32T> InterpreterAssembler::DtaPopSkip() {
+  TNode<ExternalReference> top_ref =
+      ExternalConstant(ExternalReference::taint_skip_top_address(isolate()));
+  TNode<ExternalReference> stack_ref =
+      ExternalConstant(ExternalReference::taint_skip_stack_address(isolate()));
+  TNode<Uint32T> top = Load<Uint32T>(top_ref);
+
+  // Guard: if stack is empty, return 0
+  Label empty(this), has_entry(this), done(this);
+  TVARIABLE(Word32T, result, Int32Constant(0));
+  Branch(Word32Equal(static_cast<TNode<Word32T>>(top), Int32Constant(0)),
+         &empty, &has_entry);
+
+  BIND(&empty);
+  Goto(&done);
+
+  BIND(&has_entry);
+  {
+    TNode<Word32T> new_top = UncheckedCast<Word32T>(
+        Int32Sub(UncheckedCast<Int32T>(top), Int32Constant(1)));
+    StoreNoWriteBarrier(MachineRepresentation::kWord32, top_ref, new_top);
+
+    // Direct address — no dereference needed
+    TNode<RawPtrT> stack_base = ReinterpretCast<RawPtrT>(stack_ref);
+    TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(new_top));
+    TNode<Uint8T> entry = Load<Uint8T>(stack_base, offset);
+    // Return the raw entry value. Bits:
+    //   bit 0: skip (SFI taint_skip / builtin bitmap)
+    //   bit 1: user function (set by DtaRestoreArgs/DtaPushFrameAndLeave)
+    result = static_cast<TNode<Word32T>>(entry);
+    Goto(&done);
+  }
+
+  BIND(&done);
+  return result.value();
+}
+
+TNode<BoolT> InterpreterAssembler::DtaCheckSFITaintSkip(
+    TNode<Object> function) {
+  Label not_js_function(this), sfi_bit_set(this), check_bitmap(this), done(this);
+  TVARIABLE(BoolT, result, Int32FalseConstant());
+
+  // Must be a JSFunction
+  GotoIf(TaggedIsSmi(function), &not_js_function);
+  TNode<Map> map = LoadMap(CAST(function));
+  GotoIfNot(IsJSFunctionMap(map), &not_js_function);
+
+  TNode<SharedFunctionInfo> sfi = LoadObjectField<SharedFunctionInfo>(
+      CAST(function), JSFunction::kSharedFunctionInfoOffset);
+
+  // Fast path 1: SFI TaintSkipBit (for writable SFIs — Node.js APIs, etc.)
+  TNode<Uint32T> flags =
+      LoadObjectField<Uint32T>(sfi, SharedFunctionInfo::kFlagsOffset);
+  Branch(IsSetWord32<SharedFunctionInfo::TaintSkipBit>(flags),
+         &sfi_bit_set, &check_bitmap);
+
+  BIND(&sfi_bit_set);
+  result = Int32TrueConstant();
+  Goto(&done);
+
+  // Fast path 2: Builtin skip bitmap (for read-only SFIs — Math.abs, etc.)
+  BIND(&check_bitmap);
+  {
+    TNode<Object> untrusted_data = LoadObjectField(
+        sfi, SharedFunctionInfo::kUntrustedFunctionDataOffset);
+    GotoIfNot(TaggedIsSmi(untrusted_data), &done);
+
+    TNode<IntPtrT> builtin_id = SmiUntag(CAST(untrusted_data));
+    GotoIf(IntPtrLessThan(builtin_id, IntPtrConstant(0)), &done);
+
+    TNode<ExternalReference> bitmap_ptr_addr = ExternalConstant(
+        ExternalReference::taint_builtin_bitmap_ptr_address(isolate()));
+    TNode<RawPtrT> bitmap = Load<RawPtrT>(bitmap_ptr_addr);
+    GotoIf(WordEqual(bitmap, IntPtrConstant(0)), &done);
+
+    TNode<Uint8T> entry = Load<Uint8T>(bitmap, builtin_id);
+    result = Word32NotEqual(static_cast<TNode<Word32T>>(entry), Int32Constant(0));
+    Goto(&done);
+  }
+
+  BIND(&not_js_function);
+  Goto(&done);
+
+  BIND(&done);
+  return result.value();
+}
+
+// =====================================================================
+// Inline Arg Taint Buffer
+// =====================================================================
+
+void InterpreterAssembler::DtaFillArgTaintBuf(
+    TNode<Int32T> first_reg_idx, TNode<Int32T> arg_count,
+    bool prepend_receiver) {
+  TNode<ExternalReference> buf_ref = ExternalConstant(
+      ExternalReference::taint_arg_taint_buf_address(isolate()));
+  TNode<ExternalReference> count_ref = ExternalConstant(
+      ExternalReference::taint_arg_count_address(isolate()));
+  TNode<RawPtrT> buf = ReinterpretCast<RawPtrT>(buf_ref);
+
+  TVARIABLE(Int32T, var_buf_idx, Int32Constant(0));
+
+  // If prepend_receiver, store 0 for the implicit receiver at buf[0]
+  if (prepend_receiver) {
+    StoreNoWriteBarrier(MachineRepresentation::kWord32, buf,
+                        IntPtrConstant(0), Int32Constant(0));
+    var_buf_idx = Int32Constant(1);
+  }
+
+  // Determine register direction: negative operands go downward
+  // (matches the C++ adapter's direction logic)
+  TVARIABLE(Int32T, var_direction, Int32Constant(1));
+  TVARIABLE(Int32T, var_i, Int32Constant(0));
+  {
+    Label dir_neg(this), loop_start(this);
+    GotoIf(Int32LessThan(first_reg_idx, Int32Constant(0)), &dir_neg);
+    Goto(&loop_start);
+    BIND(&dir_neg);
+    var_direction = Int32Constant(-1);
+    Goto(&loop_start);
+    BIND(&loop_start);
+  }
+
+  // CSA loop: read each arg's taint from shadow frame, write to buffer
+  Label loop(this, {&var_i, &var_buf_idx}), done(this);
+  Goto(&loop);
+
+  BIND(&loop);
+  {
+    GotoIfNot(Int32LessThan(var_i.value(), arg_count), &done);
+
+    GotoIf(Int32GreaterThanOrEqual(var_buf_idx.value(), Int32Constant(32)), &done);
+
+    // Compute the register operand for this arg
+    TNode<Int32T> reg_idx = Int32Add(first_reg_idx,
+        Int32Mul(var_i.value(), var_direction.value()));
+
+    // Track 1: Inline read from shadow frame (fast path — zero C calls)
+    TNode<Word32T> frame_taint = InlineGetRegTaint(reg_idx);
+
+    // Track 2: If frame taint is 0, fall back to heap taint
+    TVARIABLE(Word32T, effective_taint, frame_taint);
+    {
+      Label has_taint(this), check_heap(this);
+      GotoIf(Word32NotEqual(frame_taint, Int32Constant(0)), &has_taint);
+      Goto(&check_heap);
+
+      BIND(&check_heap);
+      {
+        // Read the actual tagged value from the interpreter frame at this
+        // register operand offset: fp + reg_idx * kSystemPointerSize
+        TNode<RawPtrT> frame_ptr = GetInterpretedFramePointer();
+        TNode<IntPtrT> reg_byte_offset = IntPtrMul(
+            ChangeInt32ToIntPtr(reg_idx), IntPtrConstant(kSystemPointerSize));
+        TNode<RawPtrT> reg_value = Load<RawPtrT>(frame_ptr, reg_byte_offset);
+
+        // Call GetHeapTaintForObject (C-ABI, pure hashmap read — no GC)
+        // Pass as IntPtr to preserve the tagged pointer bit (bit 0 = 1).
+        // MachineType::Pointer() would strip the tag in some code paths.
+        TNode<ExternalReference> heap_fn = ExternalConstant(
+            ExternalReference::taint_get_heap_taint_for_object());
+        TNode<Word32T> heap_taint = UncheckedCast<Word32T>(
+            CallCFunction(heap_fn, MachineType::Uint32(),
+                          std::make_pair(MachineType::IntPtr(),
+                                         ReinterpretCast<IntPtrT>(reg_value))));
+        effective_taint = heap_taint;
+        Goto(&has_taint);
+      }
+
+      BIND(&has_taint);
+    }
+
+    // Store effective taint to buffer
+    TNode<IntPtrT> buf_offset = IntPtrMul(
+        ChangeInt32ToIntPtr(var_buf_idx.value()), IntPtrConstant(sizeof(uint32_t)));
+    StoreNoWriteBarrier(MachineRepresentation::kWord32, buf, buf_offset,
+                        effective_taint.value());
+
+    var_buf_idx = Int32Add(var_buf_idx.value(), Int32Constant(1));
+    var_i = Int32Add(var_i.value(), Int32Constant(1));
+    Goto(&loop);
+  }
+
+  BIND(&done);
+  // Store total count
+  StoreNoWriteBarrier(MachineRepresentation::kWord8, count_ref,
+                      ReinterpretCast<Uint8T>(var_buf_idx.value()));
+}
+
+void InterpreterAssembler::DtaTransferArgTaintsFromBuf() {
+  // Load buffer and count from Isolate
+  TNode<ExternalReference> buf_ref = ExternalConstant(
+      ExternalReference::taint_arg_taint_buf_address(isolate()));
+  TNode<ExternalReference> count_ref = ExternalConstant(
+      ExternalReference::taint_arg_count_address(isolate()));
+  TNode<RawPtrT> buf = ReinterpretCast<RawPtrT>(buf_ref);
+  TNode<Uint8T> count = Load<Uint8T>(count_ref);
+
+  // CSA loop: for each arg, load taint from buffer and write to param register
+  TVARIABLE(Int32T, var_i, Int32Constant(0));
+  Label loop(this, &var_i), done(this);
+  Goto(&loop);
+
+  BIND(&loop);
+  {
+    GotoIfNot(Int32LessThan(var_i.value(),
+                             static_cast<TNode<Int32T>>(count)), &done);
+
+    // Load taint from buffer[i]
+    TNode<IntPtrT> buf_offset = IntPtrMul(
+        ChangeInt32ToIntPtr(var_i.value()), IntPtrConstant(sizeof(uint32_t)));
+    TNode<Uint32T> taint = Load<Uint32T>(buf, buf_offset);
+
+    // Convert parameter index i to register operand:
+    // Register::FromParameterIndex(i).ToOperand()
+    // = kRegisterFileStartOffset - (kFirstParamRegisterIndex - i)
+    // = (kRegisterFileStartOffset - kFirstParamRegisterIndex) + i
+    constexpr int kParamOperandBase =
+        interpreter::Register::FromParameterIndex(0).ToOperand();
+    TNode<Int32T> reg_operand = Int32Add(
+        Int32Constant(kParamOperandBase), var_i.value());
+
+    // Write to new shadow frame (InlineSetRegTaint writes to *frame_base_ptr_)
+    Label skip(this), write(this);
+    Branch(Word32Equal(taint, Int32Constant(0)), &skip, &write);
+
+    BIND(&write);
+    InlineSetRegTaint(reg_operand, taint);
+    Goto(&skip);
+
+    BIND(&skip);
+    var_i = Int32Add(var_i.value(), Int32Constant(1));
+    Goto(&loop);
+  }
+
+  BIND(&done);
+  // "Consume and Clear": zero out arg_count so that the NEXT function entry
+  // (e.g. a builtin-to-JS callback) correctly sees count == 0 and triggers
+  // the heap taint bridge fallback instead of reading stale buffer data.
+  StoreNoWriteBarrier(MachineRepresentation::kWord8, count_ref,
+                      ReinterpretCast<Uint8T>(Int32Constant(0)));
+}
+
+// =====================================================================
+// Legacy C-call wrappers (kept for non-hot-path callers)
+// =====================================================================
+
+// 获取寄存器污点
+TNode<Word32T> InterpreterAssembler::CallGetRegisterTaint(
+    TNode<RawPtrT> frame_ptr,
+    TNode<Int32T> reg_idx) {
+  
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_get_register_taint());
+
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, 
+      MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::Int32(), reg_idx)
+  ));
+}
+
+// 设置寄存器污点
+void InterpreterAssembler::CallSetRegisterTaint(
+    TNode<RawPtrT> frame_ptr, 
+    TNode<Int32T> reg_idx,
+    TNode<Word32T> taint_id) {
+  
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_set_register_taint());
+
+  CallCFunction(
+      function_ref, 
+      MachineType::AnyTagged(), // void 返回值占位
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::Int32(), reg_idx),
+      std::make_pair(MachineType::Uint32(), taint_id)
+  );
+}
+
+// 获取累加器污点
+TNode<Word32T> InterpreterAssembler::CallGetAccumulatorTaint() {
+  
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_get_accumulator_taint());
+
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, 
+      MachineType::Uint32()
+  ));
+}
+
+// 设置累加器污点
+void InterpreterAssembler::CallSetAccumulatorTaint(
+    TNode<Word32T> taint_id) {
+  
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_set_accumulator_taint());
+
+  CallCFunction(
+      function_ref, 
+      MachineType::AnyTagged(),
+      std::make_pair(MachineType::Uint32(), taint_id)
+  );
+}
+
+TNode<Word32T> InterpreterAssembler::CallPropagateBinaryOp(
+    TNode<Word32T> left_id,
+    TNode<Word32T> right_id,
+    TNode<Int32T> op_token) {
+
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_propagate_binary_op());
+
+  // Pass the accumulator (binary op result) so C++ can write heap wildcard
+  // taint on it. This ensures taint survives through property stores and
+  // DeepScan can find it.
+  TNode<Object> result = GetAccumulator();
+
+  // C++ 签名: uint32_t PropagateBinaryOp(uint32_t, uint32_t, int, Address)
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref,
+      MachineType::Uint32(),
+      std::make_pair(MachineType::Uint32(), left_id),
+      std::make_pair(MachineType::Uint32(), right_id),
+      std::make_pair(MachineType::Int32(), op_token),
+      std::make_pair(MachineType::AnyTagged(), result)
+  ));
+}
+
+TNode<Word32T> InterpreterAssembler::CallPrepareRuntimeArgs(
+    TNode<RawPtrT> frame_ptr,
+    TNode<Object> target_func,
+    TNode<Object> receiver_obj,
+    TNode<Int32T> first_reg_idx,
+    TNode<Int32T> arg_count,
+    bool prepend_receiver) {
+
+  // 利用 C++ 编译期求值，零运行时开销地绑定正确的外部函数
+  TNode<ExternalReference> function_ref = prepend_receiver
+      ? ExternalConstant(ExternalReference::taint_prepare_runtime_args_undefined_receiver())
+      : ExternalConstant(ExternalReference::taint_prepare_runtime_args());
+
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, 
+      MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::AnyTagged(), receiver_obj),
+      std::make_pair(MachineType::Int32(), first_reg_idx),
+      std::make_pair(MachineType::Int32(), arg_count)
+  ));
+}
+
+TNode<Word32T> InterpreterAssembler::CallPrepareSpreadRuntimeArgs(
+    TNode<RawPtrT> frame_ptr,
+    TNode<Object> target_func,
+    TNode<Int32T> first_reg_idx,
+    TNode<Int32T> normal_arg_count,
+    TNode<Int32T> spread_reg_idx,
+    TNode<Object> spread_obj) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_prepare_spread_args());
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref,
+      MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::Int32(), first_reg_idx),
+      std::make_pair(MachineType::Int32(), normal_arg_count),
+      std::make_pair(MachineType::Int32(), spread_reg_idx),
+      std::make_pair(MachineType::AnyTagged(), spread_obj)
+  ));
+}
+
+void InterpreterAssembler::CallPrepareRuntimeArgs_N0(
+    TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+    TNode<Object> receiver_obj, bool prepend_receiver) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_prepare_runtime_args_n0());
+  TNode<Int32T> prepend_node = Int32Constant(prepend_receiver ? 1 : 0);
+
+  CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::AnyTagged(), receiver_obj),
+      std::make_pair(MachineType::Int32(), prepend_node));
+}
+
+void InterpreterAssembler::CallPrepareRuntimeArgs_N1(
+    TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+    TNode<Object> receiver_obj, TNode<Int32T> reg0, bool prepend_receiver) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_prepare_runtime_args_n1());
+  TNode<Int32T> prepend_node = Int32Constant(prepend_receiver ? 1 : 0);
+
+  CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::AnyTagged(), receiver_obj),
+      std::make_pair(MachineType::Int32(), reg0),
+      std::make_pair(MachineType::Int32(), prepend_node));
+}
+
+void InterpreterAssembler::CallPrepareRuntimeArgs_N2(
+    TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+    TNode<Object> receiver_obj, TNode<Int32T> reg0, TNode<Int32T> reg1,
+    bool prepend_receiver) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_prepare_runtime_args_n2());
+  TNode<Int32T> prepend_node = Int32Constant(prepend_receiver ? 1 : 0);
+
+  CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::AnyTagged(), receiver_obj),
+      std::make_pair(MachineType::Int32(), reg0),
+      std::make_pair(MachineType::Int32(), reg1),
+      std::make_pair(MachineType::Int32(), prepend_node));
+}
+
+void InterpreterAssembler::CallPrepareRuntimeArgs_N3(
+    TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+    TNode<Object> receiver_obj, TNode<Int32T> reg0, TNode<Int32T> reg1,
+    TNode<Int32T> reg2, bool prepend_receiver) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_prepare_runtime_args_n3());
+  TNode<Int32T> prepend_node = Int32Constant(prepend_receiver ? 1 : 0);
+
+  CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::Pointer(), frame_ptr),
+      std::make_pair(MachineType::AnyTagged(), target_func),
+      std::make_pair(MachineType::AnyTagged(), receiver_obj),
+      std::make_pair(MachineType::Int32(), reg0),
+      std::make_pair(MachineType::Int32(), reg1),
+      std::make_pair(MachineType::Int32(), reg2),
+      std::make_pair(MachineType::Int32(), prepend_node));
+}
+void InterpreterAssembler::CallRestoreRuntimeArgs(
+    TNode<RawPtrT> frame_ptr) {
+  
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_restore_runtime_args());
+
+  CallCFunction(
+      function_ref, 
+      MachineType::AnyTagged(), // void 返回值占位
+      std::make_pair(MachineType::Pointer(), frame_ptr)
+  );
+}
+
+void InterpreterAssembler::CallDestroyFrame(TNode<RawPtrT> frame_ptr) {
+  TNode<ExternalReference> function_ref = 
+      ExternalConstant(ExternalReference::taint_destroy_frame());
+  
+  // 没有返回值，使用 MachineType::AnyTagged() 占位
+  CallCFunction(function_ref, MachineType::AnyTagged(),
+                std::make_pair(MachineType::Pointer(), frame_ptr));
+}
+
+TNode<Word32T> InterpreterAssembler::CallGetNamedPropertyTaint(
+    TNode<Object> object,
+    TNode<Name> name,
+    TNode<Object> result) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_get_named_property());
+
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::AnyTagged(), object),
+      std::make_pair(MachineType::AnyTagged(), name),
+      std::make_pair(MachineType::AnyTagged(), result)));
+}
+
+TNode<Word32T> InterpreterAssembler::CallSetNamedPropertyTaint(
+    TNode<Object> object,
+    TNode<Name> name,
+    TNode<Word32T> taint_id) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_set_named_property());
+  // 4th arg (key_taint) = 0 for named property stores (key is static literal)
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::AnyTagged(), object),
+      std::make_pair(MachineType::AnyTagged(), name),
+      std::make_pair(MachineType::Uint32(), taint_id),
+      std::make_pair(MachineType::Uint32(), Int32Constant(0))));
+}
+
+TNode<Word32T> InterpreterAssembler::CallGetKeyedPropertyTaint(
+    TNode<Object> object,
+    TNode<Object> key,
+    TNode<Object> result) {
+  // Reuses taint_get_named_property C++ entry point (3 args: obj, key, result)
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_get_named_property());
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::AnyTagged(), object),
+      std::make_pair(MachineType::AnyTagged(), key),
+      std::make_pair(MachineType::AnyTagged(), result)));
+}
+
+TNode<Word32T> InterpreterAssembler::CallSetKeyedPropertyTaint(
+    TNode<Object> object,
+    TNode<Object> key,
+    TNode<Word32T> taint_id,
+    TNode<Word32T> key_taint) {
+  TNode<ExternalReference> function_ref =
+      ExternalConstant(ExternalReference::taint_set_named_property());
+  return UncheckedCast<Word32T>(CallCFunction(
+      function_ref, MachineType::Uint32(),
+      std::make_pair(MachineType::AnyTagged(), object),
+      std::make_pair(MachineType::AnyTagged(), key),
+      std::make_pair(MachineType::Uint32(), taint_id),
+      std::make_pair(MachineType::Uint32(), key_taint)));
+}
+
 TNode<Object> InterpreterAssembler::LoadRegister(TNode<IntPtrT> reg_index) {
   return LoadFullTagged(GetInterpretedFramePointer(),
                         RegisterFrameOffset(reg_index));
@@ -328,6 +925,17 @@ void InterpreterAssembler::StoreRegisterForShortStar(TNode<Object> value,
       IntPtrAdd(RegisterFrameOffset(Signed(opcode)),
                 IntPtrConstant(short_star_to_operand * kSystemPointerSize));
   StoreFullTaggedNoWriteBarrier(GetInterpretedFramePointer(), offset, value);
+  
+  // =====================================================================
+  // [DTA Hook] ShortStar (Star0 ~ Star15) — ZERO C-CALL INLINE
+  // =====================================================================
+  TNode<Int32T> reg_operand = TruncateIntPtrToInt32(
+      IntPtrAdd(Signed(opcode), IntPtrConstant(short_star_to_operand))
+  );
+
+  TNode<Word32T> taint_id = InlineGetAccTaint();
+  InlineSetRegTaint(reg_operand, taint_id);
+  // =====================================================================
 }
 
 void InterpreterAssembler::StoreRegisterAtOperandIndex(TNode<Object> value,

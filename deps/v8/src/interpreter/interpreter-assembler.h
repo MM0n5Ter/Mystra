@@ -85,6 +85,78 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   TNode<Context> GetContextAtDepth(TNode<Context> context,
                                    TNode<Uint32T> depth);
 
+  // =====================================================================
+  // Dynamic Taint Analysis: INLINE Shadow Register/Accumulator
+  // Zero C function calls — CSA directly reads/writes Isolate fields.
+  // =====================================================================
+  TNode<Word32T> InlineGetAccTaint();
+  void InlineSetAccTaint(TNode<Word32T> taint_id);
+  TNode<Word32T> InlineGetRegTaint(TNode<Int32T> reg_idx);
+  void InlineSetRegTaint(TNode<Int32T> reg_idx, TNode<Word32T> taint_id);
+
+  // =====================================================================
+  // Skip Stack + SFI PIC for function call bypass
+  // =====================================================================
+  void DtaPushSkip(TNode<BoolT> should_skip);
+  TNode<Word32T> DtaPopSkip();
+  TNode<BoolT> DtaCheckSFITaintSkip(TNode<Object> function);
+
+  // =====================================================================
+  // Inline arg taint pre-read into Isolate buffer
+  // =====================================================================
+  void DtaFillArgTaintBuf(TNode<Int32T> first_reg_idx,
+                           TNode<Int32T> arg_count,
+                           bool prepend_receiver);
+  // Inline transfer from buffer to callee param registers
+  void DtaTransferArgTaintsFromBuf();
+
+  // Legacy C-call wrappers (still used by non-hot-path callers)
+  TNode<Word32T> CallGetRegisterTaint(TNode<RawPtrT> frame_ptr, TNode<Int32T> reg_idx);
+  void CallSetRegisterTaint(TNode<RawPtrT> frame_ptr, TNode<Int32T> reg_idx, TNode<Word32T> taint_id);
+  TNode<Word32T> CallGetAccumulatorTaint();
+  void CallSetAccumulatorTaint(TNode<Word32T> taint_id);
+  TNode<Word32T> CallPropagateBinaryOp(TNode<Word32T> left_id, TNode<Word32T> right_id, TNode<Int32T> op_token);
+  // =====================================================================
+  // DTA: Shadow Argument Buffer (Pre-hook)
+  // =====================================================================
+  TNode<Word32T> CallPrepareRuntimeArgs(TNode<RawPtrT> frame_ptr,
+                                        TNode<Object> target_func,
+                                        TNode<Object> receiver_obj,
+                                        TNode<Int32T> first_reg_idx,
+                                        TNode<Int32T> arg_count, bool prepend_receiver = false);
+  void CallPrepareRuntimeArgs_N0(TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+                                 TNode<Object> receiver_obj, bool prepend_receiver);
+
+  void CallPrepareRuntimeArgs_N1(TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+                                 TNode<Object> receiver_obj, TNode<Int32T> reg0,
+                                 bool prepend_receiver);
+
+  void CallPrepareRuntimeArgs_N2(TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+                                 TNode<Object> receiver_obj, TNode<Int32T> reg0,
+                                 TNode<Int32T> reg1, bool prepend_receiver);
+
+  void CallPrepareRuntimeArgs_N3(TNode<RawPtrT> frame_ptr, TNode<Object> target_func,
+                                 TNode<Object> receiver_obj, TNode<Int32T> reg0,
+                                 TNode<Int32T> reg1, TNode<Int32T> reg2,
+                                 bool prepend_receiver);
+  // Spread call: normal args from shadow frame, spread from shadow heap
+  TNode<Word32T> CallPrepareSpreadRuntimeArgs(TNode<RawPtrT> frame_ptr,
+                                               TNode<Object> target_func,
+                                               TNode<Int32T> first_reg_idx,
+                                               TNode<Int32T> normal_arg_count,
+                                               TNode<Int32T> spread_reg_idx,
+                                               TNode<Object> spread_obj);
+  void CallRestoreRuntimeArgs(TNode<RawPtrT> frame_ptr);
+  // ShadowRegister GC
+  void CallDestroyFrame(TNode<RawPtrT> frame_ptr);
+  // =====================================================================
+  // DTA: Shadow Heap Access
+  // =====================================================================
+  TNode<Word32T> CallGetNamedPropertyTaint(TNode<Object> object, TNode<Name> name, TNode<Object> result);
+  TNode<Word32T> CallSetNamedPropertyTaint(TNode<Object> object, TNode<Name> name, TNode<Word32T> taint_id);
+  TNode<Word32T> CallGetKeyedPropertyTaint(TNode<Object> object, TNode<Object> key, TNode<Object> result);
+  TNode<Word32T> CallSetKeyedPropertyTaint(TNode<Object> object, TNode<Object> key, TNode<Word32T> taint_id, TNode<Word32T> key_taint);
+
   // A RegListNodePair provides an abstraction over lists of registers.
   class RegListNodePair {
    public:
@@ -332,6 +404,11 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // Load the parameter count of the current function from its BytecodeArray.
   TNode<IntPtrT> LoadParameterCountWithoutReceiver();
 
+  // Returns the word-size sign-extended register index for bytecode operand
+  // |operand_index| in the current bytecode.
+  // [Taint] Move to public for shadow register
+  TNode<IntPtrT> BytecodeOperandReg(int operand_index);
+
  private:
   // Returns a pointer to the current function's BytecodeArray object.
   TNode<BytecodeArray> BytecodeArrayTaggedPointer();
@@ -394,10 +471,6 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
                                       OperandSize operand_size);
   TNode<Uint32T> BytecodeUnsignedOperand(int operand_index,
                                          OperandSize operand_size);
-
-  // Returns the word-size sign-extended register index for bytecode operand
-  // |operand_index| in the current bytecode.
-  TNode<IntPtrT> BytecodeOperandReg(int operand_index);
 
   // Returns the word zero-extended index immediate for bytecode operand
   // |operand_index| in the current bytecode for use when loading a constant

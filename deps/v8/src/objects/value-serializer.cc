@@ -37,6 +37,8 @@
 #include "src/objects/property-descriptor.h"
 #include "src/objects/property-details.h"
 #include "src/objects/smi.h"
+#include "src/taint/taint-core.h"
+#include "src/taint/taint-adapter.h"
 #include "src/objects/transitions-inl.h"
 #include "src/regexp/regexp.h"
 #include "src/snapshot/code-serializer.h"
@@ -240,6 +242,12 @@ enum class SerializationTag : uint8_t {
   kLegacyReservedOffscreenCanvas = 'H',
   kLegacyReservedCryptoKey = 'K',
   kLegacyReservedRTCCertificate = 'k',
+
+  // [DTA] Prefix tag for tainted objects. Followed by varint taint_id,
+  // then the normal object tag + data. Written by WriteObject when an object
+  // has taint in shadow_heap. Read by ReadObject which applies the taint
+  // to the deserialized object at its new address.
+  kDtaTaintPrefix = 0xDA,
 };
 
 namespace {
@@ -470,6 +478,84 @@ Maybe<bool> ValueSerializer::WriteObject(DirectHandle<Object> object) {
   // memory. Bail immediately, as this likely implies that some write has
   // previously failed and so the buffer is corrupt.
   if (V8_UNLIKELY(out_of_memory_)) return ThrowIfOutOfMemory();
+
+  // [DTA] If this object has taint, write a prefix tag before the normal
+  // serialization. Check heap taint first (covers rule-engine outputs,
+  // SetTaint'd objects). Then fall back to shadow_acc for the FIRST
+  // object only (covers register-only taint from binary ops like
+  // `structuredClone(tainted + " suffix")`). shadow_acc is consumed
+  // (zeroed) after use to prevent false positives on nested objects.
+  if (isolate_->taint_engine() && isolate_->taint_engine()->IsTrackingActive()
+      && !IsSmi(*object)) {
+    uintptr_t addr = (*object).ptr() & ~static_cast<uintptr_t>(1);
+    uint32_t taint_id = isolate_->taint_engine()->GetHeapTaint(
+        addr, dynalysis::ELEM_WILDCARD_KEY);
+    if (!taint_id)
+      taint_id = isolate_->taint_engine()->GetHeapTaint(
+          addr, dynalysis::PROP_WILDCARD_KEY);
+    // Fallback: arg_taint_buf for register-only taint at IPC boundary.
+    // When structuredClone(derived) is called, the DTA pre-hook fills
+    // the buffer: [0]=receiver, [1]=first arg (the value to clone).
+    // Only use this if the object being serialized MATCHES an arg address
+    // (prevents false positives from stale buffer data on nested/later objects).
+    if (!taint_id && isolate_->taint_engine()) {
+      uint8_t buf_count = *(isolate_->dta_arg_count_address());
+      size_t mapping_count = isolate_->taint_engine()->GetArgMappingCount();
+      for (size_t bi = 0; bi < mapping_count && bi < buf_count && !taint_id; bi++) {
+        uintptr_t arg_addr = isolate_->taint_engine()->GetArgPhysicalAddr(bi);
+        if (arg_addr != 0 && arg_addr == addr) {
+          taint_id = isolate_->dta_arg_taint_buf_address()[bi];
+        }
+      }
+      if (taint_id) {
+        // Consume: clear so this arg isn't matched again
+        *(isolate_->dta_arg_count_address()) = 0;
+      }
+    }
+    if (taint_id != 0) {
+      WriteTag(SerializationTag::kDtaTaintPrefix);
+      // [DTA] Serialize the full FlowNode ancestor DAG for cross-process
+      // provenance reconstruction. Wire format:
+      //   [node_count:varint] [root_index:varint] [node_0] ... [node_N-1]
+      // Each node: [type:u8] [op_len:varint] [op:raw] [parent_count:varint] [parent_indices...]
+      auto* engine = isolate_->taint_engine();
+      auto dag = engine->CollectAncestorDAG(taint_id);
+      if (dag.empty()) {
+        // Fallback: single disconnected source node
+        WriteVarint<uint32_t>(1);   // node_count
+        WriteVarint<uint32_t>(0);   // root_index
+        WriteByte(static_cast<uint8_t>(dynalysis::FlowNodeType::kSource));
+        std::string label = "IPC:Taint_" + std::to_string(taint_id);
+        WriteVarint<uint32_t>(static_cast<uint32_t>(label.size()));
+        WriteRawBytes(label.data(), label.size());
+        WriteVarint<uint32_t>(0);   // location_len (empty)
+        WriteVarint<uint32_t>(0);   // parent_count
+      } else {
+        // Build sender_id → serial_index map
+        std::unordered_map<uint32_t, uint32_t> id_to_idx;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(dag.size()); i++) {
+          id_to_idx[dag[i]->id] = i;
+        }
+        uint32_t root_index = id_to_idx[taint_id];
+        WriteVarint<uint32_t>(static_cast<uint32_t>(dag.size()));
+        WriteVarint<uint32_t>(root_index);
+        for (const dynalysis::FlowNode* node : dag) {
+          WriteByte(static_cast<uint8_t>(node->type));
+          WriteVarint<uint32_t>(static_cast<uint32_t>(node->operation.size()));
+          WriteRawBytes(node->operation.data(), node->operation.size());
+          WriteVarint<uint32_t>(static_cast<uint32_t>(node->location.size()));
+          if (!node->location.empty()) {
+            WriteRawBytes(node->location.data(), node->location.size());
+          }
+          WriteVarint<uint32_t>(static_cast<uint32_t>(node->parents.size()));
+          for (uint32_t parent_id : node->parents) {
+            auto it = id_to_idx.find(parent_id);
+            WriteVarint<uint32_t>(it != id_to_idx.end() ? it->second : 0);
+          }
+        }
+      }
+    }
+  }
 
   if (IsSmi(*object)) {
     WriteSmi(Cast<Smi>(*object));
@@ -1609,6 +1695,87 @@ MaybeDirectHandle<Object> ValueDeserializer::ReadObject() {
   // If we are at the end of the stack, abort. This function may recurse.
   STACK_CHECK(isolate_, MaybeDirectHandle<Object>());
 
+  // [DTA] Peek at next tag — if it's kDtaTaintPrefix, consume it and
+  // reconstruct the full FlowNode ancestor DAG. Uses LOCAL variables
+  // (not members) because ReadObject is recursive: nested objects must
+  // not clobber the parent's taint state.
+  uint32_t local_taint_id = 0;
+  {
+    SerializationTag peek_tag;
+    if (PeekTag().To(&peek_tag) &&
+        peek_tag == SerializationTag::kDtaTaintPrefix) {
+      ConsumeTag(SerializationTag::kDtaTaintPrefix);
+      // Read the serialized DAG: [node_count] [root_index] [nodes...]
+      uint32_t node_count = 0;
+      if (!ReadVarint<uint32_t>().To(&node_count) ||
+          node_count == 0 || node_count > 10000) {
+        return MaybeDirectHandle<Object>();
+      }
+      uint32_t root_index = 0;
+      if (!ReadVarint<uint32_t>().To(&root_index) || root_index >= node_count) {
+        return MaybeDirectHandle<Object>();
+      }
+      // Reconstruct graph: id_remap[serial_index] = new TaintEngine node ID
+      std::vector<uint32_t> id_remap(node_count, 0);
+      auto* engine = isolate_->taint_engine();
+      bool active = engine && engine->IsTrackingActive();
+      for (uint32_t i = 0; i < node_count; i++) {
+        uint8_t type_byte = 0;
+        if (!ReadByte(&type_byte)) return MaybeDirectHandle<Object>();
+        uint32_t op_len = 0;
+        if (!ReadVarint<uint32_t>().To(&op_len) || op_len > 1024) {
+          return MaybeDirectHandle<Object>();
+        }
+        std::string operation;
+        if (op_len > 0) {
+          const void* op_data = nullptr;
+          if (!ReadRawBytes(op_len, &op_data)) {
+            return MaybeDirectHandle<Object>();
+          }
+          operation.assign(static_cast<const char*>(op_data), op_len);
+        }
+        // Read location (added in location-provenance format)
+        uint32_t loc_len = 0;
+        if (!ReadVarint<uint32_t>().To(&loc_len) || loc_len > 256) {
+          return MaybeDirectHandle<Object>();
+        }
+        std::string location;
+        if (loc_len > 0) {
+          const void* loc_data = nullptr;
+          if (!ReadRawBytes(loc_len, &loc_data)) {
+            return MaybeDirectHandle<Object>();
+          }
+          location.assign(static_cast<const char*>(loc_data), loc_len);
+        }
+        uint32_t parent_count = 0;
+        if (!ReadVarint<uint32_t>().To(&parent_count) || parent_count > 32) {
+          return MaybeDirectHandle<Object>();
+        }
+        std::vector<uint32_t> parents;
+        for (uint32_t j = 0; j < parent_count; j++) {
+          uint32_t parent_idx = 0;
+          if (!ReadVarint<uint32_t>().To(&parent_idx) || parent_idx >= i) {
+            return MaybeDirectHandle<Object>();
+          }
+          parents.push_back(id_remap[parent_idx]);
+        }
+        if (active) {
+          dynalysis::FlowNodeType type =
+              static_cast<dynalysis::FlowNodeType>(type_byte);
+          if (type == dynalysis::FlowNodeType::kTransform &&
+              parents.size() == 1) {
+            id_remap[i] = engine->CreateTransformNode(operation, parents[0]);
+          } else {
+            id_remap[i] = engine->CreateNode(operation, parents);
+          }
+        }
+      }
+      local_taint_id = id_remap[root_index];
+    }
+  }
+
+  // Normal deserialization (may recurse into ReadObject for nested objects,
+  // each with its own stack-local local_taint_id)
   MaybeDirectHandle<Object> result = ReadObjectInternal();
 
   // ArrayBufferView is special in that it consumes the value before it, even
@@ -1619,6 +1786,18 @@ MaybeDirectHandle<Object> ValueDeserializer::ReadObject() {
       PeekTag().To(&tag) && tag == SerializationTag::kArrayBufferView) {
     ConsumeTag(SerializationTag::kArrayBufferView);
     result = ReadJSArrayBufferView(Cast<JSArrayBuffer>(object));
+  }
+
+  // [DTA] Apply taint from THIS prefix. local_taint_id is now the
+  // fully-reconstructed tip node ID (not just a raw sender ID).
+  if (local_taint_id != 0 && result.ToHandle(&object) && !IsSmi(*object)) {
+    if (isolate_->taint_engine() && isolate_->taint_engine()->IsTrackingActive()) {
+      uintptr_t addr = (*object).ptr() & ~static_cast<uintptr_t>(1);
+      isolate_->taint_engine()->SetHeapTaint(
+          addr, dynalysis::ELEM_WILDCARD_KEY, local_taint_id);
+      taint::TaintAdapter::RegisterWeakHandleIfNecessary(
+          isolate_, (*object).ptr());
+    }
   }
 
   if (result.is_null() && !suppress_deserialization_errors_ &&

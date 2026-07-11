@@ -197,7 +197,7 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
     const AstRawString* name_;
   };
 
-  void GenerateBytecodeBody();
+  void GenerateBytecodeBody(bool dta_restore_already_emitted = false);
 
   void GenerateBaseConstructorBody();
   void GenerateDerivedConstructorBody();

@@ -4053,6 +4053,26 @@ void BytecodeGraphBuilder::VisitIllegal() {
   UNREACHABLE();
 }
 
+void BytecodeGraphBuilder::VisitTaintPostCall() {
+  // [Taint MVP] 暂不支持在 Turbofan 中构建污点图节点
+  // UNREACHABLE();
+}
+
+void BytecodeGraphBuilder::VisitTaintBinaryOp() {
+  // [Taint MVP] 暂不支持在 Turbofan 中构建污点图节点
+  // UNREACHABLE();
+}
+
+void BytecodeGraphBuilder::VisitTaintBinaryOpSmi() {
+  // [Taint MVP] 暂不支持在 Turbofan 中构建污点图节点
+  // UNREACHABLE();
+}
+
+void BytecodeGraphBuilder::VisitDtaRestoreArgs() {
+  // [Taint MVP] 暂不支持在 Turbofan 中构建污点图节点
+  // UNREACHABLE();
+}
+
 void BytecodeGraphBuilder::SwitchToMergeEnvironment(int current_offset) {
   auto it = merge_environments_.find(current_offset);
   if (it != merge_environments_.end()) {

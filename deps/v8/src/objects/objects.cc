@@ -34,6 +34,8 @@
 #include "src/execution/execution.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
+#include "src/taint/taint-core.h"
+#include "src/taint/taint-adapter.h"
 #include "src/execution/isolate-utils-inl.h"
 #include "src/execution/isolate-utils.h"
 #include "src/execution/microtask-queue.h"
@@ -5035,6 +5037,26 @@ Handle<Object> JSPromise::Fulfill(DirectHandle<JSPromise> promise,
   // 4. Set promise.[[PromiseFulfillReactions]] to undefined.
   // 5. Set promise.[[PromiseRejectReactions]] to undefined.
   promise->set_reactions_or_result(Cast<JSAny>(*value));
+
+  // [DTA] Propagate value's heap taint to promise via DTA_PROMISE_RESOLVED_KEY.
+  // No RegisterWeakHandleIfNecessary — "Read-and-Burn" at ResumeGenerator.
+  if (isolate->taint_engine() && isolate->taint_engine()->IsTrackingActive()) {
+    uintptr_t val_addr = (*value).ptr();
+    uint32_t taint = 0;
+    if (!IsSmi(*value)) {
+      uintptr_t clean_addr = val_addr & ~static_cast<uintptr_t>(1);
+      taint = isolate->taint_engine()->GetHeapTaint(
+          clean_addr, dynalysis::ELEM_WILDCARD_KEY);
+      if (!taint)
+        taint = isolate->taint_engine()->GetHeapTaint(
+            clean_addr, dynalysis::PROP_WILDCARD_KEY);
+    }
+    if (taint) {
+      uintptr_t paddr = (*promise).ptr() & ~static_cast<uintptr_t>(1);
+      isolate->taint_engine()->SetHeapTaint(
+          paddr, dynalysis::DTA_PROMISE_RESOLVED_KEY, taint);
+    }
+  }
 
   // 6. Set promise.[[PromiseState]] to "fulfilled".
   promise->set_status(Promise::kFulfilled);

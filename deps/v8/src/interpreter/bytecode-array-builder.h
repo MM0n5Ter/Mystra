@@ -500,6 +500,12 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   BytecodeArrayBuilder& ResumeGenerator(Register generator,
                                         RegisterList registers);
 
+  // Taint tracking.
+  BytecodeArrayBuilder& TaintPostCall();
+  BytecodeArrayBuilder& TaintBinaryOp(Register reg, int op_token);
+  BytecodeArrayBuilder& TaintBinaryOpSmi(int imm_value, int op_token);
+  BytecodeArrayBuilder& DtaRestoreArgs();
+  
   // Creates a new handler table entry and returns a {hander_id} identifying the
   // entry, so that it can be referenced by above exception handling support.
   int NewHandlerEntry() { return handler_table_builder()->NewHandlerEntry(); }

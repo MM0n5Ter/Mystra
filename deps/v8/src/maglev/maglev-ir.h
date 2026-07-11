@@ -380,6 +380,18 @@ class ExceptionHandlerInfo;
   V(ThrowIfNotSuperConstructor)               \
   V(TransitionElementsKindOrCheckMap)         \
   V(SetContinuationPreservedEmbedderData)     \
+  V(DtaShadowRegToAcc)                        \
+  V(DtaShadowAccToReg)                        \
+  V(DtaShadowRegToReg)                        \
+  V(DtaTaintBinaryOp)                         \
+  V(DtaTaintBinaryOpSmi)                      \
+  V(DtaRestoreArgs)                           \
+  V(DtaDestroyFrame)                          \
+  V(DtaTaintPostCall)                         \
+  V(DtaCallPreHook)                           \
+  V(DtaShadowHeapLoad)                        \
+  V(DtaShadowHeapStore)                       \
+  V(DtaBindResultTaint)                       \
   GAP_MOVE_NODE_LIST(V)                       \
   TURBOLEV_NON_VALUE_NODE_LIST(V)
 
@@ -10796,6 +10808,350 @@ class SetContinuationPreservedEmbedderData
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
   static constexpr OpProperties kProperties = OpProperties::CanWrite();
+};
+
+// ==========================================================================
+// DTA (Dynamic Taint Analysis) Maglev IR Nodes
+// All nodes use Direct Memory Access to shadow memory via ExternalReference.
+// ==========================================================================
+
+// Ldar taint hook: copy shadow_reg[src] → shadow_acc
+class DtaShadowRegToAcc : public FixedInputNodeT<0, DtaShadowRegToAcc> {
+  using Base = FixedInputNodeT<0, DtaShadowRegToAcc>;
+
+ public:
+  explicit DtaShadowRegToAcc(uint64_t bitfield, int reg_operand)
+      : Base(bitfield), reg_operand_(reg_operand) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  int reg_operand() const { return reg_operand_; }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{reg_operand_}; }
+
+ private:
+  const int reg_operand_;
+};
+
+// Star taint hook: copy shadow_acc → shadow_reg[dst]
+class DtaShadowAccToReg : public FixedInputNodeT<0, DtaShadowAccToReg> {
+  using Base = FixedInputNodeT<0, DtaShadowAccToReg>;
+
+ public:
+  explicit DtaShadowAccToReg(uint64_t bitfield, int reg_operand)
+      : Base(bitfield), reg_operand_(reg_operand) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  int reg_operand() const { return reg_operand_; }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{reg_operand_}; }
+
+ private:
+  const int reg_operand_;
+};
+
+// Mov taint hook: copy shadow_reg[src] → shadow_reg[dst] without touching acc
+class DtaShadowRegToReg : public FixedInputNodeT<0, DtaShadowRegToReg> {
+  using Base = FixedInputNodeT<0, DtaShadowRegToReg>;
+
+ public:
+  explicit DtaShadowRegToReg(uint64_t bitfield, int src_operand,
+                             int dst_operand)
+      : Base(bitfield),
+        src_operand_(src_operand),
+        dst_operand_(dst_operand) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  int src_operand() const { return src_operand_; }
+  int dst_operand() const { return dst_operand_; }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{src_operand_, dst_operand_}; }
+
+ private:
+  const int src_operand_;
+  const int dst_operand_;
+};
+
+// Binary op taint merge: read left from shadow_reg, right from shadow_acc,
+// Binary op taint: inline OR zero-check fast path, C++ CreateNode slow path.
+// Fast: if (shadow_frame[reg] | shadow_acc) == 0 → skip (both operands clean).
+// Slow: CallRuntime → PropagateBinaryOp(left, right, op_token, result_addr)
+//       → creates derived taint node, writes new ID to shadow_acc.
+// Takes 1 tagged input: the binary op result (for heap taint binding in C++).
+class DtaTaintBinaryOp : public FixedInputNodeT<1, DtaTaintBinaryOp> {
+  using Base = FixedInputNodeT<1, DtaTaintBinaryOp>;
+
+ public:
+  explicit DtaTaintBinaryOp(uint64_t bitfield, int reg_operand, int op_token)
+      : Base(bitfield), reg_operand_(reg_operand), op_token_(op_token) {}
+
+  // DeferredCall + Call: required for GC-safe Runtime call with safepoint maps.
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::Call() |
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged};
+
+  Input& result_input() { return input(0); }
+
+  int reg_operand() const { return reg_operand_; }
+  int op_token() const { return op_token_; }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{reg_operand_, op_token_}; }
+
+ private:
+  const int reg_operand_;
+  const int op_token_;
+};
+
+// Binary op Smi taint: right operand is Smi (always clean), only check acc
+class DtaTaintBinaryOpSmi : public FixedInputNodeT<0, DtaTaintBinaryOpSmi> {
+  using Base = FixedInputNodeT<0, DtaTaintBinaryOpSmi>;
+
+ public:
+  explicit DtaTaintBinaryOpSmi(uint64_t bitfield, int op_token)
+      : Base(bitfield), op_token_(op_token) {}
+
+  // Pure no-op — Smi right operand has taint 0, shadow_acc stays as-is.
+  static constexpr OpProperties kProperties =
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  int op_token() const { return op_token_; }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{op_token_}; }
+
+ private:
+  const int op_token_;
+};
+
+// Function entry: push shadow frame + transfer arg taints from buffer
+class DtaRestoreArgs : public FixedInputNodeT<0, DtaRestoreArgs> {
+  using Base = FixedInputNodeT<0, DtaRestoreArgs>;
+
+ public:
+  explicit DtaRestoreArgs(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::CanWrite() |
+      OpProperties::CanRead() | OpProperties::NotIdempotent();
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Function return: pop shadow frame (restore caller's shadow_frame_base_)
+class DtaDestroyFrame : public FixedInputNodeT<0, DtaDestroyFrame> {
+  using Base = FixedInputNodeT<0, DtaDestroyFrame>;
+
+ public:
+  explicit DtaDestroyFrame(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Post-call: pop skip stack, 3-way branch, optionally call Runtime post-hook
+class DtaTaintPostCall : public FixedInputNodeT<1, DtaTaintPostCall> {
+  using Base = FixedInputNodeT<1, DtaTaintPostCall>;
+
+ public:
+  explicit DtaTaintPostCall(uint64_t bitfield) : Base(bitfield) {}
+
+  // DeferredCall: provides register_snapshot() for SaveRegisterStateForCall.
+  // Call: forces liveness analyzer to track tagged pointers through safepoints.
+  // Both are required — DeferredCall alone produces empty safepoint maps.
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::Call() |
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged};
+
+  Input& acc_value_input() { return input(0); }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Call pre-hook: classify target, fill arg taint buf, push skip stack, alert.
+// Variable-input node: target + N actual arg ValueNodes (GC-safe).
+// The args are pushed to Runtime so C++ can read correct tagged pointers
+// instead of reading from the Maglev frame (which has no register file).
+class DtaCallPreHook : public NodeT<DtaCallPreHook> {
+  using Base = NodeT<DtaCallPreHook>;
+
+ public:
+  static constexpr int kTargetIndex = 0;
+  static constexpr int kFixedInputCount = 1;
+
+  // Variable-input constructor: target + N arg ValueNodes.
+  // Inputs must be initialized via set_input/set_arg after construction.
+  explicit DtaCallPreHook(uint64_t bitfield, int first_reg_operand,
+                          int prepend_receiver)
+      : Base(bitfield),
+        first_reg_operand_(first_reg_operand),
+        prepend_receiver_(prepend_receiver) {}
+
+  // DeferredCall: provides register_snapshot() for SaveRegisterStateForCall.
+  // Call: forces liveness analyzer to track tagged pointers through safepoints.
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::Call() |
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  Input& target_input() { return input(kTargetIndex); }
+  int num_args() const { return input_count() - kFixedInputCount; }
+  Input& arg(int i) { return input(i + kFixedInputCount); }
+  void set_arg(int i, ValueNode* node) {
+    set_input(i + kFixedInputCount, node);
+  }
+
+  int first_reg_operand() const { return first_reg_operand_; }
+  int prepend_receiver() const { return prepend_receiver_; }
+
+#ifdef V8_COMPRESS_POINTERS
+  void MarkTaggedInputsAsDecompressing() {}
+#endif
+
+  void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const int first_reg_operand_;
+  const int prepend_receiver_;
+};
+
+// Shadow heap load: look up (object, name) in shadow heap → shadow_acc
+// Also passes the load result for deep wildcard contagion in the C++ hook.
+class DtaShadowHeapLoad : public FixedInputNodeT<3, DtaShadowHeapLoad> {
+  using Base = FixedInputNodeT<3, DtaShadowHeapLoad>;
+
+ public:
+  explicit DtaShadowHeapLoad(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::CanWrite() |
+      OpProperties::CanRead() | OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged,
+      ValueRepresentation::kTagged};
+
+  Input& object_input() { return input(0); }
+  Input& name_input() { return input(1); }
+  Input& result_input() { return input(2); }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Shadow heap store: write shadow_acc taint to (object, name) in shadow heap
+class DtaShadowHeapStore : public FixedInputNodeT<2, DtaShadowHeapStore> {
+  using Base = FixedInputNodeT<2, DtaShadowHeapStore>;
+
+ public:
+  explicit DtaShadowHeapStore(uint64_t bitfield, int key_reg_operand = -1)
+      : Base(bitfield), key_reg_operand_(key_reg_operand) {}
+
+  // DeferredCall: provides register_snapshot() for SaveRegisterStateForCall.
+  // Call: forces liveness analyzer to track tagged pointers through safepoints.
+  // Both are required — DeferredCall alone produces empty safepoint maps.
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::Call() |
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  Input& object_input() { return input(0); }
+  Input& name_input() { return input(1); }
+  int key_reg_operand() const { return key_reg_operand_; }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+  auto options() const { return std::tuple{key_reg_operand_}; }
+
+ private:
+  int key_reg_operand_;  // Shadow frame operand for key register (-1 = none)
+};
+
+// Bind shadow_acc taint to a newly created heap object (e.g., StringConcat
+// result). Registers the taint in the shadow heap so that GetHeapTaint-based
+// lookups (e.g., %GetTaint, property re-access) can find it.
+// Fast path: shadow_acc == 0 → skip. Slow path: C++ SetHeapTaint + weak handle.
+class DtaBindResultTaint : public FixedInputNodeT<1, DtaBindResultTaint> {
+  using Base = FixedInputNodeT<1, DtaBindResultTaint>;
+
+ public:
+  explicit DtaBindResultTaint(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::Call() |
+      OpProperties::CanWrite() | OpProperties::CanRead() |
+      OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged};
+
+  Input& result_input() { return input(0); }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
 class ControlNode : public NodeBase {

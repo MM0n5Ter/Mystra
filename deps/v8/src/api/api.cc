@@ -180,6 +180,8 @@
 // Has to be the last include (doesn't have include guards):
 #include "src/api/api-macros.h"
 
+#include "src/taint/taint-adapter.h"
+
 namespace v8 {
 
 static OOMErrorCallback g_oom_error_callback = nullptr;
@@ -1328,7 +1330,24 @@ void FunctionTemplate::SetClassName(Local<String> name) {
   EnsureNotPublished(info, "v8::FunctionTemplate::SetClassName");
   i::Isolate* i_isolate = info->GetIsolateChecked();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  info->set_class_name(*Utils::OpenDirectHandle(*name));
+  // =========================================================================
+  // [DTA Hook] SFI ClassName 自动署名注入 (面向对象支持)
+  // =========================================================================
+  std::string context_name = i::taint::TaintAdapter::GetCurrentAddonContext();
+  if (!context_name.empty()) {
+      std::unique_ptr<char[]> orig_name = Utils::OpenHandle(*name)->ToCString();
+      const char* short_name = orig_name.get() ? orig_name.get() : "anonymous";
+      
+      std::string injected_name = context_name + "." + short_name;
+      
+      // i::PrintF("[DTA-SFI-Inject] Template::SetClassName | %s -> %s\n", short_name, injected_name.c_str());
+
+      i::Handle<i::String> new_name = i_isolate->factory()->InternalizeUtf8String(injected_name.c_str());
+      info->set_class_name(*new_name);
+  } else {
+      info->set_class_name(*Utils::OpenDirectHandle(*name));
+  }
+  // =========================================================================
 }
 
 void FunctionTemplate::SetInterfaceName(Local<String> name) {
@@ -5458,7 +5477,29 @@ void Function::SetName(v8::Local<v8::String> name) {
   if (!IsJSFunction(*self)) return;
   auto func = i::Cast<i::JSFunction>(self);
   DCHECK_NO_SCRIPT_NO_EXCEPTION(func->GetIsolate());
-  func->shared()->SetName(*Utils::OpenDirectHandle(*name));
+  // =========================================================================
+  // [DTA Hook] SFI 自动署名注入 (带有显式 Debug 打印)
+  // =========================================================================
+  std::string context_name = i::taint::TaintAdapter::GetCurrentAddonContext();
+  if (!context_name.empty()) {
+      // 提取原生传入的短名称 (统一使用 OpenDirectHandle 适配 V8 新版 API)
+      std::unique_ptr<char[]> orig_name = Utils::OpenDirectHandle(*name)->ToCString();
+      const char* short_name = orig_name.get() ? orig_name.get() : "anonymous";
+      
+      // 拼接全名：例如 "fs" + "." + "open" -> "fs.open"
+      std::string injected_name = context_name + "." + short_name;
+      
+      // 显式 Debug 打印，方便你观察注入过程
+      // i::PrintF("[DTA-SFI-Inject] Function::SetName | %s -> %s\n", short_name, injected_name.c_str());
+
+      // [修复点] 直接通过 func->GetIsolate() 获取 factory，避免变量未声明报错
+      i::Handle<i::String> new_name = func->GetIsolate()->factory()->InternalizeUtf8String(injected_name.c_str());
+      func->shared()->SetName(*new_name);
+  } else {
+      // 非装载期，保持原生行为
+      func->shared()->SetName(*Utils::OpenDirectHandle(*name));
+  }
+  // =========================================================================
 }
 
 Local<Value> Function::GetName() const {

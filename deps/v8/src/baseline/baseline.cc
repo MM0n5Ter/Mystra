@@ -26,6 +26,10 @@ bool CanCompileWithBaseline(Isolate* isolate,
   // Check that baseline compiler is enabled.
   if (!v8_flags.sparkplug) return false;
 
+  // [DTA] Functions with DTA taint-tracking bytecodes must remain in the
+  // interpreter. Sparkplug's DTA bytecode handlers are no-ops.
+  if (v8_flags.dta_suppress_jit && shared->optimization_disabled()) return false;
+
   // Check that short builtin calls are enabled if needed.
   if (v8_flags.sparkplug_needs_short_builtins &&
       !isolate->is_short_builtin_calls_enabled()) {

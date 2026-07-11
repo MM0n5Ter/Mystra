@@ -45,6 +45,8 @@
 #include "src/strings/unicode-inl.h"
 #include "third_party/fp16/src/include/fp16.h"
 
+#include "src/taint/taint-adapter.h"
+
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-external-refs.h"
 #include "src/wasm/wasm-js.h"
@@ -590,6 +592,53 @@ ExternalReference ExternalReference::stress_deopt_count(Isolate* isolate) {
 
 ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
   return ExternalReference(isolate->force_slow_path_address());
+}
+
+ExternalReference ExternalReference::taint_shadow_acc_address(Isolate* isolate) {
+  return ExternalReference(isolate->shadow_acc_taint_address());
+}
+
+ExternalReference ExternalReference::taint_shadow_frame_base_address(Isolate* isolate) {
+  return ExternalReference(isolate->shadow_frame_base_address());
+}
+
+ExternalReference ExternalReference::taint_frame_stack_top_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_frame_stack_top_address());
+}
+
+ExternalReference ExternalReference::taint_sentinel_frame_base_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_sentinel_frame_base_address());
+}
+
+ExternalReference ExternalReference::taint_skip_stack_address(Isolate* isolate) {
+  // Returns direct address of skip_stack_[] array inside TaintEngine.
+  // CSA uses ReinterpretCast (address IS the base), no double dereference.
+  return ExternalReference(isolate->dta_skip_stack_address());
+}
+
+ExternalReference ExternalReference::taint_skip_top_address(Isolate* isolate) {
+  // Returns direct address of skip_top_ inside TaintEngine.
+  return ExternalReference(isolate->dta_skip_top_address());
+}
+
+ExternalReference ExternalReference::taint_builtin_bitmap_ptr_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_builtin_bitmap_ptr_address());
+}
+
+ExternalReference ExternalReference::taint_runtime_action_table_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_runtime_action_table_ptr_address());
+}
+
+ExternalReference ExternalReference::taint_arg_taint_buf_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_arg_taint_buf_address());
+}
+
+ExternalReference ExternalReference::taint_arg_count_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_arg_count_address());
+}
+
+ExternalReference ExternalReference::taint_any_taint_live_address(Isolate* isolate) {
+  return ExternalReference(isolate->dta_any_taint_live_address());
 }
 
 FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
@@ -1967,6 +2016,34 @@ void abort_with_reason(int reason) {
   base::OS::Abort();
   UNREACHABLE();
 }
+
+FUNCTION_REFERENCE(taint_get_register_taint, taint::TaintAdapter::GetRegisterTaint)
+FUNCTION_REFERENCE(taint_set_register_taint, taint::TaintAdapter::SetRegisterTaint)
+FUNCTION_REFERENCE(taint_get_accumulator_taint, taint::TaintAdapter::GetAccumulatorTaint)
+FUNCTION_REFERENCE(taint_set_accumulator_taint, taint::TaintAdapter::SetAccumulatorTaint)
+FUNCTION_REFERENCE(taint_propagate_binary_op, taint::TaintAdapter::PropagateBinaryOp)
+FUNCTION_REFERENCE(taint_allocate_shadow_frame, taint::TaintAdapter::AllocateShadowFrame)
+FUNCTION_REFERENCE(taint_destroy_frame, taint::TaintAdapter::DestroyFrame)
+FUNCTION_REFERENCE(taint_prepare_runtime_args, taint::TaintAdapter::CallPrepareRuntimeArgs)
+FUNCTION_REFERENCE(taint_prepare_runtime_args_undefined_receiver, taint::TaintAdapter::CallPrepareRuntimeArgs_UndefinedReceiver)
+FUNCTION_REFERENCE(taint_restore_runtime_args, taint::TaintAdapter::CallRestoreRuntimeArgs)
+FUNCTION_REFERENCE(taint_push_frame_and_leave, taint::TaintAdapter::DtaPushFrameAndLeave)
+FUNCTION_REFERENCE(taint_get_named_property, taint::TaintAdapter::CallGetNamedPropertyTaint)
+FUNCTION_REFERENCE(taint_set_named_property, taint::TaintAdapter::CallSetNamedPropertyTaint)
+FUNCTION_REFERENCE(taint_apply_call_rule, taint::TaintAdapter::CallApplyCallRuleTaint)
+FUNCTION_REFERENCE(taint_leave_call_frame_static, taint::TaintAdapter::LeaveCallFrameStatic)
+FUNCTION_REFERENCE(taint_maglev_call_pre_hook, taint::TaintAdapter::DtaMaglevCallPreHook)
+FUNCTION_REFERENCE(taint_prepare_runtime_args_n0, taint::TaintAdapter::CallPrepareRuntimeArgs_N0)
+FUNCTION_REFERENCE(taint_prepare_runtime_args_n1, taint::TaintAdapter::CallPrepareRuntimeArgs_N1)
+FUNCTION_REFERENCE(taint_prepare_runtime_args_n2, taint::TaintAdapter::CallPrepareRuntimeArgs_N2)
+FUNCTION_REFERENCE(taint_prepare_runtime_args_n3, taint::TaintAdapter::CallPrepareRuntimeArgs_N3)
+FUNCTION_REFERENCE(taint_prepare_spread_args, taint::TaintAdapter::CallPrepareSpreadArgs)
+FUNCTION_REFERENCE(taint_bridge_callback_heap_taint, taint::TaintAdapter::BridgeCallbackHeapTaint)
+FUNCTION_REFERENCE(taint_hof_extract_on_return, taint::TaintAdapter::HofExtractOnReturn)
+FUNCTION_REFERENCE(taint_get_heap_taint_for_object, taint::TaintAdapter::GetHeapTaintForObject)
+FUNCTION_REFERENCE(taint_get_effective_taint_for_arg, taint::TaintAdapter::GetEffectiveTaintForArg)
+FUNCTION_REFERENCE(taint_copy_object_taint, taint::TaintAdapter::CopyObjectTaint)
+
 
 #undef RAW_FUNCTION_REFERENCE
 #undef FUNCTION_REFERENCE

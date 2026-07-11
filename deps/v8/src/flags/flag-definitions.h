@@ -1518,6 +1518,32 @@ DEFINE_BOOL(turbo_collect_feedback_in_generic_lowering, false,
 
 DEFINE_BOOL(turboshaft, true, "enable TurboFan's Turboshaft phases for JS")
 
+// DTA (Dynamic Taint Analysis) flags
+DEFINE_BOOL(dta_suppress_jit, true,
+            "suppress JIT compilation for functions with DTA taint-tracking "
+            "bytecodes, keeping them in the interpreter for full taint tracking")
+DEFINE_BOOL(dta_maglev, false,
+            "enable DTA taint tracking in Maglev JIT compiler; when true, "
+            "overrides dta_suppress_jit to allow Maglev compilation")
+DEFINE_NEG_IMPLICATION(dta_maglev, dta_suppress_jit)
+// When Maglev DTA is active, block Turbofan tiering — Turbofan has no-op DTA handlers.
+DEFINE_NEG_IMPLICATION(dta_maglev, turbofan)
+// Block OSR when DTA is active — OSR frame state translation with DTA bytecodes
+// causes SIGSEGV. Functions tier up at entry instead (next call after warmup).
+DEFINE_NEG_IMPLICATION(dta_maglev, use_osr)
+// Block Sparkplug when DTA is active — Sparkplug baseline JIT has no DTA shadow
+// frame hooks (Star, Ldar, etc.), causing taint loss in Sparkplug-compiled callers.
+DEFINE_NEG_IMPLICATION(dta_maglev, sparkplug)
+DEFINE_BOOL(dta_disable_skipbit, false,
+            "Disable DTA fast-path skip optimizations (SFI TaintSkipBit + "
+            "Builtin Bitmap) for debugging; forces ALL calls into C++ slow-path")
+DEFINE_STRING(dta_json_log, nullptr,
+              "Path to JSONL file for structured DTA output "
+              "(alerts, gaps, provenance)")
+DEFINE_INT(dta_log_level, 2,
+           "DTA log verbosity: 0=off, 1=alert, 2=info (default), 3=debug, "
+           "4=trace")
+
 // Can't use Turbofan without Turboshaft.
 DEFINE_NEG_NEG_IMPLICATION(turboshaft, turbofan)
 

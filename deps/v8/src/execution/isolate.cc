@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "src/execution/isolate.h"
+#include "src/taint/taint-adapter.h"
+#include "src/taint/taint-logger.h"
 
 #include <stdlib.h>
 
@@ -2312,6 +2314,12 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
     }
 #endif
 
+    // [DTA] Unwind shadow frames + recover thrown object's taint into shadow_acc.
+    if (taint_engine_) {
+      taint::TaintAdapter::UnwindAndRecoverExceptionTaint(
+          this, static_cast<uintptr_t>(handler_fp), exception);
+    }
+
     // Return and clear exception. The contract is that:
     // (1) the exception is stored in one place (no duplication), and
     // (2) within generated-code land, that one place is the return register.
@@ -4567,6 +4575,13 @@ void Isolate::Deinit() {
   // updated anymore.
   DumpAndResetStats();
 
+  // [Taint] Release taint engine and logger
+  taint_engine_.reset();
+  if (dta_logger_) {
+    dta_logger_->Shutdown();
+    dta_logger_.reset();
+  }
+
   heap_.TearDown();
   isolate_group()->RemoveIsolate(this);
 
@@ -5685,6 +5700,26 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   }
 #endif  // V8_EXTERNAL_CODE_SPACE
 
+  // [Taint] Logger BEFORE TaintEngine — logger is standalone, no deps.
+  {
+    dta_logger_ = std::make_unique<dynalysis::DtaLogger>();
+    int raw_level = v8_flags.dta_log_level;
+    if (v8_flags.dta_disable_skipbit && raw_level < 3) raw_level = 3;
+    if (raw_level < 0) raw_level = 0;
+    if (raw_level > 4) raw_level = 4;
+    const char* json_log_path = v8_flags.dta_json_log;
+    if (!json_log_path) json_log_path = std::getenv("DTA_JSON_LOG");
+    dta_logger_->Init(json_log_path,
+                      static_cast<dynalysis::DtaLogger::Level>(raw_level));
+  }
+
+  // [Taint] TaintEngine MUST be constructed BEFORE ExternalReferenceTable::Init.
+  // The table calls dta_skip_stack_address() / dta_skip_top_address() which
+  // return direct addresses into TaintEngine heap memory.
+  taint_engine_ = std::make_unique<dynalysis::TaintEngine>(
+      &shadow_acc_taint_, &shadow_frame_base_);
+  taint_engine_->set_logger(dta_logger_.get());
+
   isolate_data_.external_reference_table()->Init(this);
 
 #ifdef V8_COMPRESS_POINTERS
@@ -5758,6 +5793,10 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // Profiler has to be created after ThreadLocal is initialized
   // because it makes use of interrupts.
   tracing_cpu_profiler_.reset(new TracingCpuProfilerImpl(this));
+
+  // [Taint] taint_engine_ already constructed above (before ExternalReferenceTable::Init).
+  // [Taint] Eagerly load taint rules + builtin skip bitmap
+  v8::internal::taint::TaintAdapter::EagerInitializeForIsolate(this);
 
   bootstrapper_->Initialize(create_heap_objects);
 

@@ -51,6 +51,8 @@
 #include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/allocation.h"
 
+#include "src/taint/taint-core.h"
+
 #ifdef DEBUG
 #include "src/runtime/runtime-utils.h"
 #endif
@@ -1180,6 +1182,48 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   inline bool is_##name(Tagged<UNPAREN(type)> value);
   NATIVE_CONTEXT_FIELDS(NATIVE_CONTEXT_FIELD_ACCESSOR)
 #undef NATIVE_CONTEXT_FIELD_ACCESSOR
+
+  // [Taint] Isolate independent global engine
+  dynalysis::TaintEngine* taint_engine() const { return taint_engine_.get(); }
+  dynalysis::DtaLogger* dta_logger() const { return dta_logger_.get(); }
+
+  // [Taint] Hot shadow fields for zero-C-call CSA inline access
+  uint32_t* shadow_acc_taint_address() { return &shadow_acc_taint_; }
+  uint32_t** shadow_frame_base_address() { return &shadow_frame_base_; }
+  size_t* dta_frame_stack_top_address() {
+    return taint_engine_->frame_stack_top_address();
+  }
+  uint32_t** dta_sentinel_frame_base_address() {
+    return taint_engine_->sentinel_frame_base_address();
+  }
+
+  // [Taint] Skip stack: data lives inside TaintEngine (heap).
+  // ExternalReference returns direct address into TaintEngine — no Isolate fields.
+  // CSA/Maglev use single dereference (address IS the base).
+  uint8_t* dta_skip_stack_address() { return taint_engine_->skip_stack_ptr(); }
+  uint32_t* dta_skip_top_address() { return taint_engine_->skip_top_address(); }
+  uint32_t dta_skip_top() const { return taint_engine_->skip_top(); }
+  uint8_t* dta_skip_stack_ptr() { return taint_engine_->skip_stack_ptr(); }
+
+  // [Taint] Builtin skip bitmap for read-only SFIs (Phase 3)
+  uint8_t** dta_builtin_bitmap_ptr_address() { return &dta_builtin_bitmap_; }
+  uint8_t* dta_builtin_bitmap() { return dta_builtin_bitmap_; }
+  void set_dta_builtin_bitmap(uint8_t* bm) { dta_builtin_bitmap_ = bm; }
+
+  // [Taint] Runtime action table: O(1) lookup by Runtime::FunctionId
+  // Values are skip bytes: 0x03=untracked, 0x02=preserve, 0x00=tracked
+  uint8_t** dta_runtime_action_table_ptr_address() { return &dta_runtime_action_table_; }
+  uint8_t* dta_runtime_action_table() { return dta_runtime_action_table_; }
+  void set_dta_runtime_action_table(uint8_t* t) { dta_runtime_action_table_ = t; }
+
+  // [Taint] Pre-read arg taint buffer (CSA fills at PreHook)
+  uint32_t* dta_arg_taint_buf_address() { return dta_arg_taint_buf_; }
+  uint8_t* dta_arg_count_address() { return &dta_arg_count_; }
+
+  // [Taint] "Any taint live" latch — inline-read by DtaShadowHeapLoad's fast
+  // path; set once via the TaintEngine taint-live callback.
+  uint8_t* dta_any_taint_live_address() { return &dta_any_taint_live_; }
+  void dta_set_any_taint_live() { dta_any_taint_live_ = 1; }
 
   Bootstrapper* bootstrapper() { return bootstrapper_; }
   // Use for updating counters on a foreground thread.
@@ -2546,6 +2590,26 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   IsolateGroup* isolate_group_;
   Heap heap_;
   ReadOnlyHeap* read_only_heap_ = nullptr;
+
+  // [Taint] Hot shadow fields (CSA reads/writes these directly via ExternalReference)
+  uint32_t shadow_acc_taint_{0};
+  uint32_t* shadow_frame_base_{nullptr};
+  // [Taint] Skip stack lives entirely inside TaintEngine (no Isolate fields).
+  // ExternalReference resolves directly to TaintEngine heap addresses.
+  // [Taint] Builtin skip bitmap (heap-allocated, indexed by Builtin ID)
+  uint8_t* dta_builtin_bitmap_{nullptr};
+  // [Taint] Runtime action table (indexed by Runtime::FunctionId, values are skip bytes)
+  uint8_t* dta_runtime_action_table_{nullptr};
+  // [Taint] Pre-read arg taint buffer (CSA fills, DtaRestoreArgs reads)
+  uint32_t dta_arg_taint_buf_[32]{};
+  uint8_t dta_arg_count_{0};
+  // [Taint] Monotonic latch: 0 until the first taint node is minted, then 1.
+  // Read inline (no lock, no C call) by DtaShadowHeapLoad to skip the heap
+  // query when no taint can possibly be live. Set via the TaintEngine
+  // taint-live callback (registered in TaintAdapter init).
+  uint8_t dta_any_taint_live_{0};
+  std::unique_ptr<dynalysis::TaintEngine> taint_engine_;
+  std::unique_ptr<dynalysis::DtaLogger> dta_logger_;
 
   // These are guaranteed empty when !OwnsStringTables().
   std::unique_ptr<StringTable> string_table_;

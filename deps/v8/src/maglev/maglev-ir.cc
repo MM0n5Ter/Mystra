@@ -8119,6 +8119,123 @@ std::optional<int32_t> NodeBase::TryGetInt32ConstantInput(int index) {
   return {};
 }
 
+// ==========================================================================
+// DTA (Dynamic Taint Analysis) Node Implementations
+// Constraint + PrintParams only. GenerateCode is in x64/maglev-ir-x64.cc.
+// ==========================================================================
+
+void DtaShadowRegToAcc::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void DtaShadowRegToAcc::PrintParams(std::ostream& os,
+                                    MaglevGraphLabeller*) const {
+  os << "(reg=" << reg_operand_ << ")";
+}
+
+void DtaShadowAccToReg::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void DtaShadowAccToReg::PrintParams(std::ostream& os,
+                                    MaglevGraphLabeller*) const {
+  os << "(reg=" << reg_operand_ << ")";
+}
+
+void DtaShadowRegToReg::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void DtaShadowRegToReg::PrintParams(std::ostream& os,
+                                    MaglevGraphLabeller*) const {
+  os << "(src=" << src_operand_ << ", dst=" << dst_operand_ << ")";
+}
+
+int DtaTaintBinaryOp::MaxCallStackArgs() const {
+  return 4;  // Runtime::kDtaPropagateBinaryOp takes 4 args
+}
+void DtaTaintBinaryOp::SetValueLocationConstraints() {
+  UseRegister(result_input());
+  set_temporaries_needed(2);
+}
+void DtaTaintBinaryOp::PrintParams(std::ostream& os,
+                                   MaglevGraphLabeller*) const {
+  os << "(reg=" << reg_operand_ << ", op=" << op_token_ << ")";
+}
+
+int DtaTaintBinaryOpSmi::MaxCallStackArgs() const { return 0; }
+void DtaTaintBinaryOpSmi::SetValueLocationConstraints() {
+  set_temporaries_needed(1);
+}
+void DtaTaintBinaryOpSmi::PrintParams(std::ostream& os,
+                                      MaglevGraphLabeller*) const {
+  os << "(op=" << op_token_ << ")";
+}
+
+int DtaRestoreArgs::MaxCallStackArgs() const {
+  return MaglevAssembler::ArgumentStackSlotsForCFunctionCall(1);
+}
+void DtaRestoreArgs::SetValueLocationConstraints() {
+  set_temporaries_needed(3);
+}
+
+int DtaDestroyFrame::MaxCallStackArgs() const { return 0; }
+void DtaDestroyFrame::SetValueLocationConstraints() {}
+
+int DtaTaintPostCall::MaxCallStackArgs() const {
+  return 1;  // Runtime::kDtaApplyCallRuleTaint takes 1 arg
+}
+void DtaTaintPostCall::SetValueLocationConstraints() {
+  UseRegister(acc_value_input());
+  set_temporaries_needed(2);
+}
+
+int DtaCallPreHook::MaxCallStackArgs() const {
+  // Slow path pushes: target + Smi(prepend) + Smi(first_reg) + N actual args
+  return 3 + num_args();
+}
+void DtaCallPreHook::SetValueLocationConstraints() {
+  UseRegister(target_input());  // Fast path needs target in register
+  for (int i = 0; i < num_args(); i++) {
+    UseAny(arg(i));  // Args only used in slow path (via PushInput)
+  }
+  set_temporaries_needed(0);  // Use kScratchRegister + kCArgRegs[0] only
+}
+void DtaCallPreHook::VerifyInputs(MaglevGraphLabeller* graph_labeller) const {
+  for (int i = 0; i < input_count(); i++) {
+    CheckValueInputIs(this, i, ValueRepresentation::kTagged, graph_labeller);
+  }
+}
+void DtaCallPreHook::PrintParams(std::ostream& os,
+                                 MaglevGraphLabeller*) const {
+  os << "(first_reg=" << first_reg_operand_ << ", argc=" << num_args()
+     << ", prepend=" << prepend_receiver_ << ")";
+}
+
+int DtaShadowHeapLoad::MaxCallStackArgs() const {
+  return MaglevAssembler::ArgumentStackSlotsForCFunctionCall(3);
+}
+void DtaShadowHeapLoad::SetValueLocationConstraints() {
+  UseRegister(object_input());
+  UseRegister(name_input());
+  UseRegister(result_input());
+  // No temporaries needed — reuse kReturnRegister0 as scratch after CallCFunction
+}
+
+int DtaShadowHeapStore::MaxCallStackArgs() const {
+  return 4;  // Runtime::kDtaSetNamedPropertyTaint takes 4 args (obj, name, val_taint, key_taint)
+}
+void DtaShadowHeapStore::SetValueLocationConstraints() {
+  UseRegister(object_input());
+  UseRegister(name_input());
+  set_temporaries_needed(0);  // Use kScratchRegister + kCArgRegs
+}
+
+int DtaBindResultTaint::MaxCallStackArgs() const {
+  return 1;  // Runtime::kDtaBindResultTaint takes 1 arg (result object)
+}
+void DtaBindResultTaint::SetValueLocationConstraints() {
+  UseRegister(result_input());
+  set_temporaries_needed(1);
+}
+
 }  // namespace maglev
 }  // namespace internal
 }  // namespace v8
