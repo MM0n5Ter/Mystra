@@ -164,12 +164,11 @@ __pycache__
 .DS_Store
 *~
 
-# === Rules for C++ development ===
-compile_commands.json
-
 # === Dev Container rules ===
 # Only track the shared base devcontainer.json; ignore everything else under .devcontainer
 !.devcontainer/
 .devcontainer/**
 !.devcontainer/base/
 !.devcontainer/base/devcontainer.json
+
+/evaluation
