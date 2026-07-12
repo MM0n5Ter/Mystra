@@ -1,3 +1,37 @@
+Mystra / Shar — the dynamic taint analysis engine, the Mystra rule language and
+compiler, and related tooling added in this repository (notably the contents of
+deps/v8/src/taint/ and language/, and the DTA modifications to V8 and Node.js) —
+is licensed under the MIT License:
+
+"""
+MIT License
+
+Copyright (c) 2026 The Mystra Authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+This project is a fork of Node.js. Node.js, V8, and all bundled dependencies
+remain under their original licenses, reproduced below.
+
+--------------------------------------------------------------------------------
+
 Node.js is licensed for use as follows:
 
 """
