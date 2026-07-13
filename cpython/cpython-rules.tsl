@@ -1,0 +1,275 @@
+# ============================================================
+# cpython-rules.tsl — CPython Taint Rule Set
+#
+# Compiled by mystra-compiler.py (Mystra v3 grammar) → cpython-rules.tbin
+# Syntax: lowercase keyword actions (propagate/forward/sink/set/clear), no rule
+#   terminator, store vars without a $ sigil, `let` declarations.
+# Namespace: Py_native (method descriptors), Py_hostapi (module-level C functions)
+# Dispatch: all map to kHostApi (category 3) for hash-based lookup
+#
+# Key format: "type_name.func_name" from _dta_classify_callee()
+#   PyCFunction:    m_module + "." + ml_name       → "posix.system"
+#   PyMethodDescr:  d_type->tp_name + "." + ml_name → "str.lower"
+#   PyType:         "type." + tp_name               → "type.int"
+# ============================================================
+
+
+# ============================================================
+# String — Propagate (self -> ret)
+# ============================================================
+
+rule Py_native::str.lower:              propagate @self -> @ret
+rule Py_native::str.upper:              propagate @self -> @ret
+rule Py_native::str.strip:              propagate @self -> @ret
+rule Py_native::str.lstrip:             propagate @self -> @ret
+rule Py_native::str.rstrip:             propagate @self -> @ret
+rule Py_native::str.title:              propagate @self -> @ret
+rule Py_native::str.capitalize:         propagate @self -> @ret
+rule Py_native::str.casefold:           propagate @self -> @ret
+rule Py_native::str.swapcase:           propagate @self -> @ret
+rule Py_native::str.center:             propagate @self -> @ret
+rule Py_native::str.ljust:              propagate @self -> @ret
+rule Py_native::str.rjust:              propagate @self -> @ret
+rule Py_native::str.zfill:              propagate @self -> @ret
+rule Py_native::str.expandtabs:         propagate @self -> @ret
+rule Py_native::str.encode:             propagate @self -> @ret
+
+# String — Propagate with args
+rule Py_native::str.replace(old, new):  propagate @self, new -> @ret
+rule Py_native::str.format:             propagate @self, @args[0:] -> @ret
+rule Py_native::str.join(iterable):     propagate @self, iterable -> @ret
+
+# String — Propagate self -> ret[*] (split returns list of parts)
+rule Py_native::str.split:              propagate @self -> @ret
+rule Py_native::str.rsplit:             propagate @self -> @ret
+rule Py_native::str.splitlines:         propagate @self -> @ret
+rule Py_native::str.partition:          propagate @self -> @ret
+rule Py_native::str.rpartition:         propagate @self -> @ret
+
+# String — Forward (same taint ID, no new FlowNode)
+rule Py_native::str.__getitem__:        forward @self -> @ret
+
+# String — Clear (returns int/bool, not string data)
+rule Py_native::str.find:               clear
+rule Py_native::str.rfind:              clear
+rule Py_native::str.index:              clear
+rule Py_native::str.rindex:             clear
+rule Py_native::str.count:              clear
+rule Py_native::str.startswith:         clear
+rule Py_native::str.endswith:           clear
+rule Py_native::str.isalpha:            clear
+rule Py_native::str.isdigit:            clear
+rule Py_native::str.isalnum:            clear
+rule Py_native::str.isspace:            clear
+rule Py_native::str.isupper:            clear
+rule Py_native::str.islower:            clear
+
+
+# ============================================================
+# Bytes — Propagate
+# ============================================================
+
+rule Py_native::bytes.decode:           propagate @self -> @ret
+rule Py_native::bytes.lower:            propagate @self -> @ret
+rule Py_native::bytes.upper:            propagate @self -> @ret
+rule Py_native::bytes.strip:            propagate @self -> @ret
+rule Py_native::bytes.replace:          propagate @self -> @ret
+rule Py_native::bytes.split:            propagate @self -> @ret
+
+
+# ============================================================
+# Container — Propagate
+# ============================================================
+
+rule Py_native::list.copy:              propagate @self -> @ret
+rule Py_native::list.pop:               propagate @self -> @ret
+rule Py_native::dict.get:               propagate @self -> @ret
+rule Py_native::dict.pop:               propagate @self -> @ret
+rule Py_native::dict.keys:              propagate @self -> @ret
+rule Py_native::dict.values:            propagate @self -> @ret
+rule Py_native::dict.items:             propagate @self -> @ret
+rule Py_native::dict.copy:              propagate @self -> @ret
+rule Py_native::dict.setdefault:        propagate @self -> @ret
+rule Py_native::tuple.__getitem__:      forward @self -> @ret
+rule Py_native::list.__getitem__:       forward @self -> @ret
+
+# Container — Clear (return None or int)
+rule Py_native::list.append:            clear
+rule Py_native::list.extend:            clear
+rule Py_native::list.insert:            clear
+rule Py_native::list.remove:            clear
+rule Py_native::list.sort:              clear
+rule Py_native::list.reverse:           clear
+rule Py_native::list.clear:             clear
+rule Py_native::dict.update:            clear
+rule Py_native::dict.clear:             clear
+rule Py_native::set.add:                clear
+rule Py_native::set.discard:            clear
+rule Py_native::set.remove:             clear
+
+
+# ============================================================
+# Type Conversions — Propagate
+# ============================================================
+
+rule Py_hostapi::builtins.int:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.float:        propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.str:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.bytes:        propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.chr:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.hex:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.oct:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.bin:          propagate @args[0:] -> @ret
+
+
+# ============================================================
+# Builtins — Propagate
+# ============================================================
+
+rule Py_hostapi::builtins.getattr:      propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.sorted:       propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.reversed:     propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.enumerate:    propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.zip:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.map:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.filter:       propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.min:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.max:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.sum:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.abs:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.round:        propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.pow:          propagate @args[0:] -> @ret
+rule Py_hostapi::builtins.divmod:       propagate @args[0:] -> @ret
+
+
+# ============================================================
+# Builtins — Clear (meta-operations, return type/int/bool)
+# ============================================================
+
+rule Py_hostapi::builtins.len:          clear
+rule Py_hostapi::builtins.type:         clear
+rule Py_hostapi::builtins.id:           clear
+rule Py_hostapi::builtins.hash:         clear
+rule Py_hostapi::builtins.isinstance:   clear
+rule Py_hostapi::builtins.issubclass:   clear
+rule Py_hostapi::builtins.bool:         clear
+rule Py_hostapi::builtins.repr:         clear
+rule Py_hostapi::builtins.ascii:        clear
+rule Py_hostapi::builtins.ord:          clear
+rule Py_hostapi::builtins.dir:          clear
+rule Py_hostapi::builtins.vars:         clear
+rule Py_hostapi::builtins.print:        clear
+
+
+# ============================================================
+# DTA Introspection — Clear (prevent singleton pollution)
+# ============================================================
+
+rule Py_hostapi::_taint.set_taint:      clear
+rule Py_hostapi::_taint.get_taint:      clear
+rule Py_hostapi::_taint.print_flow_tree: clear
+
+
+# ============================================================
+# Var Store — I/O Boundary Taint Bridging
+# ============================================================
+# Tracks taint across filesystem boundaries where data leaves the
+# interpreter (written to disk) and re-enters (read from disk).
+# The kernel creates new PyObject* on read, severing taint.
+# SET parks taint on the write side; PROPAGATE restores it on read.
+#
+# Key: path.value (string content hash via PyObject_Hash) — bridges even
+# when different PyObject* instances hold the same path string.
+# Declared with [ref] key type; .value is compatible at compile time and
+# resolves to GetParamRawValue() at runtime (Python string hash).
+
+let fs_taint[ref] -> taint ;
+
+# Write side: park taint when a tainted path is used to create/write
+rule Py_hostapi::posix.mkdir(path):
+    set fs_taint[path.value] = path.taint
+rule Py_hostapi::posix.makedirs(path):
+    set fs_taint[path.value] = path.taint
+
+# Read side: restore taint when the same path is re-observed
+# posix.listdir returns entries from a directory — if the directory
+# path itself was tainted, propagate to the listing
+rule Py_hostapi::posix.listdir(path):
+    propagate fs_taint[path.value] -> @ret
+
+# stat/isdir/exists — common post-listdir pattern:
+#   for d in os.listdir(parent):
+#       if os.path.isdir(os.path.join(parent, d)):  ← joined path may match
+# These call posix.stat internally with the full path
+rule Py_hostapi::posix.stat(path):
+    propagate fs_taint[path.value] -> @ret
+
+# File I/O: open() is BOTH a CWE-22 path-traversal sink AND parks taint on the
+# filename (write) so a later read of that path restores it. Both behaviours
+# must live in ONE rule per signature: the shared-core rule map keeps a single
+# descriptor per signature, so two separate `rule _io.open` declarations shadow
+# each other (the SET write-park hid the SINK_CHECK, which is why open alerts
+# previously had to come from the adapter's hardcoded fallback table). A single
+# descriptor carries both sub-rules — SINK_CHECK and the arg-referencing SET
+# both fire in the pre-hook.
+rule Py_hostapi::_io.open(file):
+    sink file @cwe(22)
+    set fs_taint[file.value] = file.taint
+rule Py_hostapi::builtins.open(file):
+    sink file @cwe(22)
+    set fs_taint[file.value] = file.taint
+
+
+# ============================================================
+# Sinks — CWE-94 Code Injection
+# ============================================================
+
+rule Py_hostapi::builtins.eval(code):           sink code @cwe(94)
+rule Py_hostapi::builtins.exec(code):           sink code @cwe(94)
+rule Py_hostapi::builtins.compile(source):      sink source @cwe(94)
+rule Py_hostapi::builtins.__import__(name):     sink name @cwe(95)
+
+
+# ============================================================
+# Sinks — CWE-78 OS Command Injection
+# ============================================================
+
+rule Py_hostapi::posix.system(cmd):             sink cmd @cwe(78)
+rule Py_hostapi::posix.popen(cmd):              sink cmd @cwe(78)
+rule Py_hostapi::_posixsubprocess.fork_exec:    sink @args[0:] @cwe(78)
+
+
+# ============================================================
+# Sinks — CWE-22 Path Traversal
+# ============================================================
+
+# _io.open / builtins.open CWE-22 SINK_CHECK is merged into the write-park rule
+# above (single descriptor per signature — see the File I/O comment).
+rule Py_hostapi::posix.remove(path):            sink path @cwe(22)
+rule Py_hostapi::posix.rename(src, dst):        sink src, dst @cwe(22)
+rule Py_hostapi::posix.mkdir(path):             sink path @cwe(22)
+rule Py_hostapi::posix.rmdir(path):             sink path @cwe(22)
+rule Py_hostapi::posix.listdir(path):           sink path @cwe(22)
+
+
+# ============================================================
+# Sinks — CWE-502 Deserialization
+# ============================================================
+
+rule Py_hostapi::_pickle.loads(data):           sink data @cwe(502)
+rule Py_hostapi::marshal.loads(data):           sink data @cwe(502)
+
+
+# ============================================================
+# Sinks — CWE-89 SQL Injection
+# ============================================================
+
+# Runtime signature comes from the bound C method's type tp_name, which is the
+# PUBLIC module name "sqlite3.Connection" (connection.c: MODULE_NAME ".Connection"),
+# NOT the internal "_sqlite3". SQLAlchemy's sqlite backend executes via the
+# Cursor, so cover both Connection and Cursor execute variants.
+rule Py_hostapi::sqlite3.Connection.execute(sql):       sink sql @cwe(89)
+rule Py_hostapi::sqlite3.Connection.executescript(sql): sink sql @cwe(89)
+rule Py_hostapi::sqlite3.Cursor.execute(sql):           sink sql @cwe(89)
+rule Py_hostapi::sqlite3.Cursor.executescript(sql):     sink sql @cwe(89)
+rule Py_hostapi::sqlite3.Cursor.executemany(sql):       sink sql @cwe(89)

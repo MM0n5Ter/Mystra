@@ -97,7 +97,11 @@ CMP_OP_MAP = {'==': CMP_EQ, '!=': CMP_NEQ, '>': CMP_GT,
 LIT_STRING = 0; LIT_INT = 1; LIT_BOOL = 2; LIT_NULL = 3; LIT_STRING_SET = 4
 
 # Dispatch categories
-CATEGORY_MAP = {'V8_native': 0, 'V8_runtime': 1, 'V8_bytecode': 2, 'Node': 3, 'V8_hostapi': 3}
+# CPython namespaces (Py_native, Py_hostapi) both map to host_api (3): CPython has
+# no V8 builtin IDs, so every rule is dispatched by signature string via the
+# host_api hash map (mirrors the CPython adapter's GetBuiltinId() == -1).
+CATEGORY_MAP = {'V8_native': 0, 'V8_runtime': 1, 'V8_bytecode': 2, 'Node': 3, 'V8_hostapi': 3,
+                'Py_native': 3, 'Py_hostapi': 3}
 
 # ---- CST Helpers ----
 
