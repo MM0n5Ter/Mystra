@@ -1543,6 +1543,9 @@ DEFINE_STRING(dta_json_log, nullptr,
 DEFINE_INT(dta_log_level, 2,
            "DTA log verbosity: 0=off, 1=alert, 2=info (default), 3=debug, "
            "4=trace")
+DEFINE_STRING(dta_rules_path, nullptr,
+              "Path to the compiled .tbin taint rule file "
+              "(default ./language/v8-rules.tbin)")
 
 // Can't use Turbofan without Turboshaft.
 DEFINE_NEG_NEG_IMPLICATION(turboshaft, turbofan)

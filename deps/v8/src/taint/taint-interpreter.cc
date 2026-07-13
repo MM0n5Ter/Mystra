@@ -35,14 +35,11 @@ static std::vector<VarDeclaration>* g_var_declarations = nullptr;
 // =========================================================================
 // Rule loader — .tbin binary only
 // =========================================================================
-static ParsedRuleSet LoadRules() {
-    const char* env_path = std::getenv("DTA_RULES_PATH");
-    std::string file_path;
-
-    if (env_path && strlen(env_path) > 0) {
-        file_path = std::string(env_path);
-    } else {
-        file_path = "./language/v8-rules.tbin";
+static ParsedRuleSet LoadRules(const std::string& file_path) {
+    if (file_path.empty()) {
+        std::cerr << "[DTA-ERROR] No rules path provided by adapter "
+                  << "— returning empty ruleset" << std::endl;
+        return ParsedRuleSet{};
     }
 
     std::ifstream file(file_path, std::ios::binary | std::ios::ate);
@@ -66,8 +63,9 @@ static void InitializeTaintRules(IVmAdapter& vm) {
     g_builtin_rules = new std::vector<BuiltinRuleDescriptor>(builtin_count);
     g_host_api_rules = new std::unordered_map<std::string, BuiltinRuleDescriptor>();
 
-    // Load rules (.tbin binary)
-    ParsedRuleSet ruleset = LoadRules();
+    // Load rules (.tbin binary). Path is resolved by the host adapter so the
+    // core interpreter stays filesystem/engine-agnostic.
+    ParsedRuleSet ruleset = LoadRules(vm.GetRulesPath());
 
     // Store var declarations for engine initialization
     if (!ruleset.var_declarations.empty()) {

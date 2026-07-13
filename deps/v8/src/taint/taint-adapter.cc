@@ -1847,6 +1847,16 @@ void V8VmAdapter::PrintObject(uintptr_t obj_addr) {
     isolate_->dta_logger()->ObjectDump(type_name);
 }
 
+// Resolve the compiled rule file path: --dta-rules-path flag, else the
+// default ./language/v8-rules.tbin. Owning this here keeps the core
+// interpreter filesystem/engine-agnostic.
+std::string V8VmAdapter::GetRulesPath() {
+    if (v8_flags.dta_rules_path && v8_flags.dta_rules_path[0] != '\0') {
+        return std::string(v8_flags.dta_rules_path);
+    }
+    return std::string("./language/v8-rules.tbin");
+}
+
 // =======================================================================
 // Builtin-to-JS callback heap taint bridge
 // Called from DtaRestoreArgs after DtaTransferArgTaintsFromBuf.

@@ -50,7 +50,7 @@ const derived = "cmd " + secret;        // taint propagates through operations
 ```
 
 By default the engine loads `./language/v8-rules.tbin`; override with the
-`DTA_RULES_PATH` environment variable.
+`--dta-rules-path <path>` flag.
 
 ### Flags
 
@@ -60,6 +60,8 @@ By default the engine loads `./language/v8-rules.tbin`; override with the
 | `--dta-suppress-jit` | on | Keep taint-carrying functions in the Ignition interpreter for full tracking (implied off by `--dta-maglev`). |
 | `--dta-disable-skipbit` | off | Debug: disable fast-path skip optimizations, forcing every call through the C++ slow path with verbose logging. |
 | `--dta-json-log <path>` | — | Write structured DTA output (alerts, provenance, coverage gaps) as JSONL. |
+| `--dta-log-level <0-4>` | 2 | Text log verbosity on stderr: 0=off, 1=alert only, 2=info, 3=debug, 4=trace. Use `1` to see sink alerts without info/gap noise. |
+| `--dta-rules-path <path>` | `./language/v8-rules.tbin` | Path to the compiled `.tbin` rule file. |
 | `--allow-natives-syntax` | — | Required to use the `%SetTaint` / `%GetTaint` intrinsics. |
 | `--expose-gc` | — | Used by GC-safety tests. |
 

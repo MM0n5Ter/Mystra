@@ -53,6 +53,7 @@ class V8VmAdapter : public dynalysis::IVmAdapter {
   uint64_t GetStringContentHash(int arg_index) override;
   void PrintStackTrace() override;
   void PrintObject(uintptr_t obj_addr) override;
+  std::string GetRulesPath() override;
 
  private:
   Isolate* isolate_;

@@ -244,6 +244,11 @@ public:
     // Debug utilities
     virtual void PrintStackTrace() = 0;
     virtual void PrintObject(uintptr_t obj_addr) = 0;
+
+    // --- Host configuration (engine-specific, resolved by the adapter) ---
+    // Path to the compiled .tbin rule file. The core stays filesystem-agnostic;
+    // the adapter owns flag/env/default resolution.
+    virtual std::string GetRulesPath() = 0;
 };
 
 // =========================================================================
