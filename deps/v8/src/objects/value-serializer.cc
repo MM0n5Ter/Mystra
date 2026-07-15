@@ -252,6 +252,13 @@ enum class SerializationTag : uint8_t {
 
 namespace {
 
+// [DTA] Version of the taint sub-format that follows kDtaTaintPrefix. Bumped
+// whenever the node record layout or FlowNodeType encoding changes, so a reader
+// built against a different layout detects the mismatch instead of silently
+// mis-reconstructing the DAG. (Pre-versioned streams have no byte here and are
+// rejected by the read-side check.)
+constexpr uint8_t kDtaTaintFormatVersion = 2;
+
 enum class ArrayBufferViewTag : uint8_t {
   kInt8Array = 'b',
   kUint8Array = 'B',
@@ -514,17 +521,21 @@ Maybe<bool> ValueSerializer::WriteObject(DirectHandle<Object> object) {
     }
     if (taint_id != 0) {
       WriteTag(SerializationTag::kDtaTaintPrefix);
+      WriteByte(kDtaTaintFormatVersion);
       // [DTA] Serialize the full FlowNode ancestor DAG for cross-process
-      // provenance reconstruction. Wire format:
+      // provenance reconstruction. Wire format (after the version byte):
       //   [node_count:varint] [root_index:varint] [node_0] ... [node_N-1]
-      // Each node: [type:u8] [op_len:varint] [op:raw] [parent_count:varint] [parent_indices...]
+      // Each node: [type:u8] [op_len:varint] [op:raw] [loc_len:varint] [loc:raw]
+      //            [parent_count:varint] [parent_indices...]
+      // node type is always kTransfer here — event nodes are endpoints and are
+      // never reachable as ancestors, so they never cross the wire.
       auto* engine = isolate_->taint_engine();
       auto dag = engine->CollectAncestorDAG(taint_id);
       if (dag.empty()) {
         // Fallback: single disconnected source node
         WriteVarint<uint32_t>(1);   // node_count
         WriteVarint<uint32_t>(0);   // root_index
-        WriteByte(static_cast<uint8_t>(dynalysis::FlowNodeType::kSource));
+        WriteByte(static_cast<uint8_t>(dynalysis::FlowNodeType::kTransfer));
         std::string label = "IPC:Taint_" + std::to_string(taint_id);
         WriteVarint<uint32_t>(static_cast<uint32_t>(label.size()));
         WriteRawBytes(label.data(), label.size());
@@ -1705,6 +1716,14 @@ MaybeDirectHandle<Object> ValueDeserializer::ReadObject() {
     if (PeekTag().To(&peek_tag) &&
         peek_tag == SerializationTag::kDtaTaintPrefix) {
       ConsumeTag(SerializationTag::kDtaTaintPrefix);
+      // Validate the taint sub-format version. On mismatch the following bytes
+      // are unparseable under this layout, so fail the deserialization safely
+      // (empty MaybeHandle — never crash) rather than mis-reconstruct.
+      uint8_t taint_version = 0;
+      if (!ReadByte(&taint_version) ||
+          taint_version != kDtaTaintFormatVersion) {
+        return MaybeDirectHandle<Object>();
+      }
       // Read the serialized DAG: [node_count] [root_index] [nodes...]
       uint32_t node_count = 0;
       if (!ReadVarint<uint32_t>().To(&node_count) ||
@@ -1760,14 +1779,11 @@ MaybeDirectHandle<Object> ValueDeserializer::ReadObject() {
           parents.push_back(id_remap[parent_idx]);
         }
         if (active) {
-          dynalysis::FlowNodeType type =
-              static_cast<dynalysis::FlowNodeType>(type_byte);
-          if (type == dynalysis::FlowNodeType::kTransform &&
-              parents.size() == 1) {
-            id_remap[i] = engine->CreateTransformNode(operation, parents[0]);
-          } else {
-            id_remap[i] = engine->CreateNode(operation, parents);
-          }
+          // All serialized data nodes are kTransfer; source-ness is recovered
+          // from parents.empty() inside CreateNode. The type_byte is read for
+          // framing/version-compat but no longer selects a constructor.
+          (void)type_byte;
+          id_remap[i] = engine->CreateNode(operation, parents);
         }
       }
       local_taint_id = id_remap[root_index];

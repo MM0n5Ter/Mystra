@@ -86,22 +86,22 @@ uint32_t TaintEngine::CreateNode(const std::string& operation, const std::vector
     return new_id;
 }
 
-uint32_t TaintEngine::CreateTransformNode(const std::string& operation, uint32_t parent_id) {
-    if (parent_id == 0 || parent_id >= nodes_.size() || !nodes_[parent_id]) {
-        return 0;
-    }
-
-    // Fold consecutive identical transforms
-    if (nodes_[parent_id]->type == FlowNodeType::kTransform &&
-        nodes_[parent_id]->operation == operation) {
-        return parent_id;
-    }
-
+uint32_t TaintEngine::CreateEventNode(const std::string& operation,
+                                      const std::vector<uint32_t>& parents) {
+    is_tracking_active_ = true;
     NotifyTaintLive();
     uint32_t new_id = static_cast<uint32_t>(nodes_.size());
-    std::vector<uint32_t> parents = {parent_id};
+
+    std::vector<uint32_t> unique_parents;
+    for (uint32_t p : parents) {
+        if (p != 0 && std::find(unique_parents.begin(), unique_parents.end(), p) == unique_parents.end()) {
+            unique_parents.push_back(p);
+        }
+    }
+
     std::string loc = GetLocation();
-    nodes_.push_back(std::make_unique<FlowNode>(new_id, operation, loc, parents, FlowNodeType::kTransform));
+    nodes_.push_back(std::make_unique<FlowNode>(new_id, operation, loc, unique_parents,
+                                                FlowNodeType::kEvent));
     return new_id;
 }
 
@@ -624,11 +624,12 @@ void TaintEngine::PrintFlowTreeRecursive(uint32_t node_id, const std::string& pr
 
     const auto& node = nodes_[node_id];
     std::string type_str;
-    switch (node->type) {
-        case FlowNodeType::kSource: type_str = "Source"; break;
-        case FlowNodeType::kDerive: type_str = "Propagate"; break;
-        case FlowNodeType::kTransform: type_str = "Forward"; break;
-        default: type_str = "Unknown"; break;
+    if (node->type == FlowNodeType::kEvent) {
+        type_str = "Sink";
+    } else if (node->parents.empty()) {
+        type_str = "Source";
+    } else {
+        type_str = "Propagate";
     }
 
     fprintf(stderr, "%s%s[ID: %u] %s [%s]\n",

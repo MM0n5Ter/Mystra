@@ -136,8 +136,8 @@ void DtaLogger::SerializeDag(const TaintEngine* engine, uint32_t taint_id,
     if (node == nullptr) continue;
 
     const char* type_str = "D";
-    if (node->type == FlowNodeType::kSource) type_str = "S";
-    else if (node->type == FlowNodeType::kTransform) type_str = "T";
+    if (node->type == FlowNodeType::kEvent) type_str = "K";  // sink endpoint
+    else if (node->parents.empty()) type_str = "S";          // source
 
     char escaped_op[256];
     EscapeJsonString(node->operation.c_str(), escaped_op, sizeof(escaped_op));
@@ -205,9 +205,9 @@ void DtaLogger::PrintDagTextRecursive(TaintEngine* engine,
   const FlowNode* node = engine->GetNode(node_id);
   if (node == nullptr) return;
 
-  const char* type_str = "[Derive]";
-  if (node->type == FlowNodeType::kSource) type_str = "[Source]";
-  else if (node->type == FlowNodeType::kTransform) type_str = "[Transform]";
+  const char* type_str = "[Transfer]";
+  if (node->type == FlowNodeType::kEvent) type_str = "[Sink]";
+  else if (node->parents.empty()) type_str = "[Source]";
 
   char line[512];
   snprintf(line, sizeof(line), "%s%s [%u] %s %s\n", prefix,

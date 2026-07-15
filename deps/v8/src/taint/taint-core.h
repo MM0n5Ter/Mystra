@@ -64,10 +64,13 @@ struct VarDeclaration {
 // =========================================================================
 // Flow graph node types
 // =========================================================================
-enum class FlowNodeType {
-    kSource,     // Taint source (injected by %SetTaint)
-    kDerive,     // Derived node (e.g. concat/replace, may have multiple parents)
-    kTransform   // Transform node (e.g. toLowerCase/trim, exactly 1 parent)
+enum class FlowNodeType : uint8_t {
+    // Only distinctions structure cannot recover get a tag.
+    kTransfer = 0,  // Data node: propagates taint through an op. N parents.
+                    //   Source-ness is derived from parents.empty(), not tagged.
+                    //   (merges the former kSource/kDerive/kTransform.)
+    kEvent = 1,     // Witness/endpoint (sink): non-consuming, never in a shadow
+                    //   slot, never serialized (endpoints aren't ancestors).
 };
 
 struct FlowNode {
@@ -78,9 +81,9 @@ struct FlowNode {
     FlowNodeType type;
 
     FlowNode() = default;
-    FlowNode(uint32_t i, std::string op, std::vector<uint32_t> p, FlowNodeType t = FlowNodeType::kDerive)
+    FlowNode(uint32_t i, std::string op, std::vector<uint32_t> p, FlowNodeType t = FlowNodeType::kTransfer)
         : id(i), operation(std::move(op)), parents(std::move(p)), type(t) {}
-    FlowNode(uint32_t i, std::string op, std::string loc, std::vector<uint32_t> p, FlowNodeType t = FlowNodeType::kDerive)
+    FlowNode(uint32_t i, std::string op, std::string loc, std::vector<uint32_t> p, FlowNodeType t = FlowNodeType::kTransfer)
         : id(i), operation(std::move(op)), location(std::move(loc)), parents(std::move(p)), type(t) {}
 };
 
@@ -150,7 +153,7 @@ public:
     }
 
     // Taint-live callback — set by runtime adapter at init time. Invoked the
-    // first time any taint node is minted (CreateNode/CreateTransformNode), so
+    // first time any taint node is minted (CreateNode/CreateEventNode), so
     // the engine-agnostic core can notify the host runtime that taint has
     // entered without referencing any host (V8) types. Used by V8 to flip an
     // Isolate latch that gates the inline DtaShadowHeapLoad fast path.
@@ -167,7 +170,9 @@ public:
     uint32_t CreateNode(const std::string& operation, uint32_t parent);
     uint32_t CreateNode(const std::string& operation, uint32_t p1, uint32_t p2);
     uint32_t CreateNode(const std::string& operation, const std::vector<uint32_t>& parents);
-    uint32_t CreateTransformNode(const std::string& operation, uint32_t parent);
+    // Endpoint witness (sink). Tagged kEvent; parents are the tainted args.
+    // Non-consuming: it only appends to the DAG, never alters shadow state.
+    uint32_t CreateEventNode(const std::string& operation, const std::vector<uint32_t>& parents);
     void AddParent(uint32_t child_id, uint32_t parent_id);
     const FlowNode* GetNode(uint32_t id);
     std::vector<const FlowNode*> CollectAncestorDAG(uint32_t tip_id) const;
