@@ -234,6 +234,23 @@ void DtaLogger::Alert(int cwe, const char* sink,
                       TaintEngine* engine) {
   if (level_ < Level::kAlert) return;
 
+  // [DTA] Materialize ONE sink event node as the tree endpoint: its parents are
+  // the (deduped) tainted-arg taints. Non-consuming — it only anchors the DAG
+  // for output and is never bound to an object, so it never crosses IPC. Both
+  // sink paths (ExecSink, AlertBytecode) funnel through here, so both re-root.
+  uint32_t endpoint = 0;
+  if (engine) {
+    std::vector<uint32_t> ep_parents;
+    for (const auto& arg : tainted_args) {
+      uint32_t tid = arg.second;
+      if (tid == 0) continue;
+      bool seen = false;
+      for (uint32_t p : ep_parents) if (p == tid) { seen = true; break; }
+      if (!seen) ep_parents.push_back(tid);
+    }
+    endpoint = engine->CreateEventNode(sink, ep_parents);
+  }
+
   if (IsJsonMode()) {
     char buf[262144];
     size_t pos = 0;
@@ -260,60 +277,32 @@ void DtaLogger::Alert(int cwe, const char* sink,
       }
     }
     {
-      const char* s = "],\"dag\":{";
-      size_t len = strlen(s);
-      if (pos + len < sizeof(buf)) {
-        memcpy(buf + pos, s, len);
-        pos += len;
+      char hdr[48];
+      int hn = snprintf(hdr, sizeof(hdr),
+                        "],\"endpoint\":%u,\"dag\":", endpoint);
+      if (hn > 0 && pos + static_cast<size_t>(hn) < sizeof(buf)) {
+        memcpy(buf + pos, hdr, static_cast<size_t>(hn));
+        pos += static_cast<size_t>(hn);
       }
     }
 
-    // Collect unique taint_ids and serialize DAGs
-    bool first_dag = true;
-    std::vector<uint32_t> seen_ids;
-    for (const auto& arg : tainted_args) {
-      uint32_t tid = arg.second;
-      if (tid == 0) continue;
-      bool already_seen = false;
-      for (uint32_t seen : seen_ids) {
-        if (seen == tid) { already_seen = true; break; }
-      }
-      if (already_seen) continue;
-      seen_ids.push_back(tid);
-
+    // [DTA] One DAG rooted at the sink endpoint: endpoint -> tainted args ->
+    // ... -> sources. Replaces the former per-tid "dag" object.
+    {
       char dag_buf[65536];
-      SerializeDag(engine, tid, dag_buf, sizeof(dag_buf));
-
-      char key_buf[32];
-      snprintf(key_buf, sizeof(key_buf), "%s\"%u\":",
-               first_dag ? "" : ",", tid);
-      first_dag = false;
-
-      size_t key_len = strlen(key_buf);
+      SerializeDag(engine, endpoint, dag_buf, sizeof(dag_buf));
       size_t dag_len = strlen(dag_buf);
-      if (pos + key_len + dag_len < sizeof(buf)) {
-        memcpy(buf + pos, key_buf, key_len);
-        pos += key_len;
+      if (pos + dag_len + 1 < sizeof(buf)) {
         memcpy(buf + pos, dag_buf, dag_len);
         pos += dag_len;
-      }
-
-      // Check if we're running out of space
-      if (pos + 256 >= sizeof(buf)) {
-        if (pos + 32 < sizeof(buf)) {
-          int tn = snprintf(buf + pos, sizeof(buf) - pos,
-                            "},\"dag_truncated\":true}");
-          if (tn > 0) pos += static_cast<size_t>(tn);
-          buf[pos] = '\0';
-          WriteJsonLine(buf);
-          fflush(json_file_);
-          return;
-        }
-        break;
+      } else {
+        const char* t = "[]";  // fallback: empty DAG on overflow
+        size_t tl = strlen(t);
+        if (pos + tl + 1 < sizeof(buf)) { memcpy(buf + pos, t, tl); pos += tl; }
       }
     }
     {
-      const char* s = "}}";
+      const char* s = "}";
       size_t len = strlen(s);
       if (pos + len < sizeof(buf)) {
         memcpy(buf + pos, s, len);
@@ -342,19 +331,8 @@ void DtaLogger::Alert(int cwe, const char* sink,
     pos += snprintf(line + pos, sizeof(line) - pos, "\n");
     WriteText(line);
 
-    // Print DAGs for each unique taint_id
-    std::vector<uint32_t> seen_ids;
-    for (const auto& arg : tainted_args) {
-      uint32_t tid = arg.second;
-      if (tid == 0) continue;
-      bool already_seen = false;
-      for (uint32_t seen : seen_ids) {
-        if (seen == tid) { already_seen = true; break; }
-      }
-      if (already_seen) continue;
-      seen_ids.push_back(tid);
-      PrintDagText(engine, tid);
-    }
+    // Print ONE DAG rooted at the sink endpoint (sink at root, sources at leaves).
+    PrintDagText(engine, endpoint);
   }
 }
 
