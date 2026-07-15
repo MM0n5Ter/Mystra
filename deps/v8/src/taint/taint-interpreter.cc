@@ -369,10 +369,8 @@ uint32_t TslInterpreter::Propagate(
     ActionType action) 
 {
     if (sources.empty() && action != ActionType::kTaintSource) return 0;
-    if (action == ActionType::kPropagate || action == ActionType::kCollapse) {
+    if (action == ActionType::kPropagate) {
         return engine->CreateNode(op_label, sources);
-    } else if (action == ActionType::kForward) {
-        return engine->CreateTransformNode(op_label, sources.front());
     } else if (action == ActionType::kTaintSource) {
         return engine->CreateNode(op_label);  // Source node, no parents
     }
@@ -704,7 +702,7 @@ bool TslInterpreter::ShouldFireInPhase(ActionType action, ExecutionPhase phase, 
             if (phase == ExecutionPhase::kPreHook) return !SetReferencesReturn(sr);
             if (phase == ExecutionPhase::kPostHook) return SetReferencesReturn(sr);
             return false;
-        default: // kPropagate, kForward, kClear, kPreserve, kCollapse, kTaintSource
+        default: // kPropagate, kClear, kPreserve, kTaintSource
             return phase == ExecutionPhase::kPostHook;
     }
 }
@@ -761,30 +759,6 @@ void TslInterpreter::ExecPropagate(IVmAdapter& vm, TaintEngine* engine,
     if (sources.empty()) return;
     std::string label = std::string(desc.operation_name) + " [" + sr.label_suffix + "]";
     uint32_t new_id = Propagate(engine, label, sources, sr.action);
-    for (const SinkLocator& sink : sr.sinks) {
-        ScatterToSink(vm, engine, new_id, sink, ctx.result_addr);
-    }
-}
-
-void TslInterpreter::ExecForward(IVmAdapter& vm, TaintEngine* engine,
-                                 const BuiltinRuleDescriptor& desc,
-                                 const SubRule& sr, const ExecutionContext& ctx) {
-    auto sources = CollectSources(vm, engine, sr.sources);
-    if (sources.empty()) return;
-    std::string label = std::string(desc.operation_name) + " [" + sr.label_suffix + "]";
-    uint32_t new_id = Propagate(engine, label, sources, ActionType::kForward);
-    for (const SinkLocator& sink : sr.sinks) {
-        ScatterToSink(vm, engine, new_id, sink, ctx.result_addr);
-    }
-}
-
-void TslInterpreter::ExecCollapse(IVmAdapter& vm, TaintEngine* engine,
-                                  const BuiltinRuleDescriptor& desc,
-                                  const SubRule& sr, const ExecutionContext& ctx) {
-    auto sources = CollectSources(vm, engine, sr.sources);
-    if (sources.empty()) return;
-    std::string label = std::string(desc.operation_name) + " [" + sr.label_suffix + "]";
-    uint32_t new_id = Propagate(engine, label, sources, ActionType::kCollapse);
     for (const SinkLocator& sink : sr.sinks) {
         ScatterToSink(vm, engine, new_id, sink, ctx.result_addr);
     }
@@ -890,10 +864,6 @@ uint32_t TslInterpreter::InterpretDescriptor(
         switch (sr.action) {
             case ActionType::kPropagate:
                 ExecPropagate(vm, engine, desc, sr, ctx); break;
-            case ActionType::kForward:
-                ExecForward(vm, engine, desc, sr, ctx); break;
-            case ActionType::kCollapse:
-                ExecCollapse(vm, engine, desc, sr, ctx); break;
             case ActionType::kTaintSource:
                 ExecTaintSource(vm, engine, desc, sr, ctx); break;
             case ActionType::kSink:

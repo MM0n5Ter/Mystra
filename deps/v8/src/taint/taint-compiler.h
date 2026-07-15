@@ -28,11 +28,11 @@
 // Per SubRule:
 //   [0]     ActionType (u8):
 //             0 = Propagate (PROPAGATE)
-//             1 = Forward   (FORWARD)
+//             1 = RESERVED  (was FORWARD; merged into PROPAGATE)
 //             2 = Clear     (CLEAR)
 //             3 = Sink     (SINK)
 //             4 = Preserve  (PRESERVE)
-//             5 = Collapse  (COLLAPSE)
+//             5 = RESERVED  (was COLLAPSE; merged into PROPAGATE)
 //             6 = TaintSource (TAINT_SOURCE)
 //             7 = Inject    (INJECT)
 //             8 = Extract   (EXTRACT)

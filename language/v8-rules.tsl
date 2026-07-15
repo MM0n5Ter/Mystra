@@ -49,20 +49,20 @@ rule V8_native::StringPrototypeLink(url):           propagate @self, url -> @ret
 
 
 # ============================================================
-# String — Forward (self -> ret, same taint ID)
+# String — Propagate (self -> ret, derived taint)
 # ============================================================
 
-rule V8_native::StringPrototypeTrim:                forward @self -> @ret
-rule V8_native::StringPrototypeTrimStart:           forward @self -> @ret
-rule V8_native::StringPrototypeTrimEnd:             forward @self -> @ret
-rule V8_native::StringPrototypeToLowerCaseIntl:     forward @self -> @ret
-rule V8_native::StringPrototypeToUpperCaseIntl:     forward @self -> @ret
-rule V8_native::StringPrototypeToLocaleLowerCase:   forward @self -> @ret
-rule V8_native::StringPrototypeToLocaleUpperCase:   forward @self -> @ret
-rule V8_native::StringPrototypeNormalizeIntl:       forward @self -> @ret
-rule V8_native::StringPrototypeToWellFormed:        forward @self -> @ret
-rule V8_native::StringPrototypeToString:            forward @self -> @ret
-rule V8_native::StringPrototypeValueOf:             forward @self -> @ret
+rule V8_native::StringPrototypeTrim:                propagate @self -> @ret
+rule V8_native::StringPrototypeTrimStart:           propagate @self -> @ret
+rule V8_native::StringPrototypeTrimEnd:             propagate @self -> @ret
+rule V8_native::StringPrototypeToLowerCaseIntl:     propagate @self -> @ret
+rule V8_native::StringPrototypeToUpperCaseIntl:     propagate @self -> @ret
+rule V8_native::StringPrototypeToLocaleLowerCase:   propagate @self -> @ret
+rule V8_native::StringPrototypeToLocaleUpperCase:   propagate @self -> @ret
+rule V8_native::StringPrototypeNormalizeIntl:       propagate @self -> @ret
+rule V8_native::StringPrototypeToWellFormed:        propagate @self -> @ret
+rule V8_native::StringPrototypeToString:            propagate @self -> @ret
+rule V8_native::StringPrototypeValueOf:             propagate @self -> @ret
 
 
 # ============================================================
@@ -155,7 +155,7 @@ rule V8_native::ArrayPrototypePush(...items):       propagate items -> @self[*]
 rule V8_native::ArrayPrototypePop:                  propagate @self[*] -> @ret
 rule V8_native::ArrayPrototypeShift:                propagate @self[*] -> @ret
 rule V8_native::ArrayPrototypeAt(index):            propagate @self[*] -> @ret
-rule V8_native::ArrayPrototypeJoin(sep):            collapse @self[*], sep -> @ret
+rule V8_native::ArrayPrototypeJoin(sep):            propagate @self[*], sep -> @ret
 rule V8_native::ArrayFrom(iterable, mapFn):
     propagate iterable[*] -> @ret[*]
     inject iterable[*] -> mapFn.param[0] where mapFn.isCallback
@@ -245,7 +245,7 @@ rule V8_native::SetPrototypeForEach:
 
 rule V8_native::PromiseResolveTrampoline(value):    propagate value -> @ret[*]
 rule V8_native::PromisePrototypeThen(onFulfilled, onRejected):
-    forward @self[*] -> @ret[*]
+    propagate @self[*] -> @ret[*]
     inject @self[*] -> onFulfilled.param[0]
     extract onFulfilled.ret -> @ret[*]
     inject @self -> onRejected.param[0]
@@ -269,20 +269,20 @@ rule V8_native::RegExpPrototypeReplace(input, replacement):
 # ============================================================
 
 rule V8_native::JsonStringify(value):
-    collapse value, value[*] -> @ret
+    propagate value, value[*] -> @ret
 
 rule V8_native::JsonParse(text):
     propagate text -> @ret, @ret[**], @ret.**
 
 
 # ============================================================
-# URI — Forward encoding/decoding
+# URI — Propagate encoding/decoding
 # ============================================================
 
-rule V8_native::GlobalDecodeURIComponent(uri):      forward uri -> @ret
-rule V8_native::GlobalDecodeURI(uri):               forward uri -> @ret
-rule V8_native::GlobalEncodeURIComponent(uri):      forward uri -> @ret
-rule V8_native::GlobalEncodeURI(uri):               forward uri -> @ret
+rule V8_native::GlobalDecodeURIComponent(uri):      propagate uri -> @ret
+rule V8_native::GlobalDecodeURI(uri):               propagate uri -> @ret
+rule V8_native::GlobalEncodeURIComponent(uri):      propagate uri -> @ret
+rule V8_native::GlobalEncodeURI(uri):               propagate uri -> @ret
 
 
 # ============================================================

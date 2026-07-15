@@ -85,7 +85,7 @@
       ]
     },
     "action-keyword": {
-      "match": "\\b(propagate|forward|inject|extract|sink|collapse|source|clear|preserve|set)\\b",
+      "match": "\\b(propagate|inject|extract|sink|source|clear|preserve|set)\\b",
       "name": "keyword.operator.action.tsl"
     },
     "guard": {

@@ -19,11 +19,11 @@ from tree_sitter import Language, Parser
 
 # Actions
 ACTION_PROPAGATE    = 0
-ACTION_FORWARD      = 1
+# 1 = RESERVED (was ACTION_FORWARD; merged into PROPAGATE)
 ACTION_CLEAR        = 2
 ACTION_SINK   = 3
 ACTION_PRESERVE     = 4
-ACTION_COLLAPSE     = 5
+# 5 = RESERVED (was ACTION_COLLAPSE; merged into PROPAGATE)
 ACTION_TAINT_SOURCE = 6
 ACTION_INJECT       = 7
 ACTION_EXTRACT      = 8
@@ -342,16 +342,12 @@ class TSLCompiler:
             t = child.type
             if t == 'propagate_rule':
                 return self._walk_flow_rule(child, ACTION_PROPAGATE, params, param_map)
-            elif t == 'forward_rule':
-                return self._walk_flow_rule(child, ACTION_FORWARD, params, param_map)
             elif t == 'inject_rule':
                 return self._walk_inject_rule(child, params, param_map)
             elif t == 'extract_rule':
                 return self._walk_extract_rule(child, params, param_map)
             elif t == 'sink_rule':
                 return self._walk_sink_rule(child, params, param_map)
-            elif t == 'collapse_rule':
-                return self._walk_flow_rule(child, ACTION_COLLAPSE, params, param_map)
             elif t == 'taint_source_rule':
                 return self._walk_taint_source_rule(child, params, param_map)
             elif t == 'clear_rule':
@@ -363,7 +359,7 @@ class TSLCompiler:
         return []
 
     def _walk_flow_rule(self, node, action, params, param_map):
-        """Walk propagate/forward/collapse rule: ACTION sources -> sinks [guard]."""
+        """Walk a flow rule (propagate): ACTION sources -> sinks [guard]."""
         sources = self._walk_source_list(child_of_type(node, 'source_list'), params, param_map)
         sinks = self._walk_sink_list(child_of_type(node, 'sink_list'), params, param_map)
         guard_node = child_of_type(node, 'guard')
@@ -1531,7 +1527,7 @@ def dump_tbin(data):
 
     bn = ['Self', 'Arg', 'ArgRange', 'Return', 'Global', 'CbParam', 'CbRet', 'VarLookup']
     on = ['None', 'ElemShallow', 'PropShallow', 'SpecProp', 'DeepScan', 'DynKey', 'ElemDeep', 'PropDeep']
-    an = ['Propagate', 'Forward', 'Clear', 'Sink', 'Preserve', 'Collapse', 'TaintSource', 'Inject', 'Extract', 'Set']
+    an = ['Propagate', '_reserved1', 'Clear', 'Sink', 'Preserve', '_reserved5', 'TaintSource', 'Inject', 'Extract', 'Set']
     cn = ['V8_native', 'V8_runtime', 'V8_bytecode', 'Node']
     for _ in range(rc):
         si = struct.unpack_from('<H', data, pos)[0]; pos += 2

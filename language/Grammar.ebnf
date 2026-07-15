@@ -60,22 +60,18 @@ rule_decl      = "rule", func_sig, [ param_list ], ":", rule_body ;
 rule_body      = sub_rule, { sub_rule } ;
 
 sub_rule       = propagate_rule
-               | forward_rule
                | inject_rule
                | extract_rule
                | sink_rule
-               | collapse_rule
                | source_rule
                | clear_rule
                | preserve_rule
                | set_rule ;
 
 propagate_rule = "propagate", source_list, "->", sink_list,      [ guard ] ;
-forward_rule   = "forward",   source_list, "->", sink_list,      [ guard ] ;
 inject_rule    = "inject",    source_list, "->", callback_sink,  [ guard ] ;
 extract_rule   = "extract",   callback_source, "->", sink_list,  [ guard ] ;
 sink_rule      = "sink",      source_list, alert_anno,           [ guard ] ;
-collapse_rule  = "collapse",  source_list, "->", sink_list,      [ guard ] ;
 source_rule    = "source",    "->", sink_list,                   [ guard ] ;
 clear_rule     = "clear",                                        [ guard ] ;
 preserve_rule  = "preserve",                                     [ guard ] ;

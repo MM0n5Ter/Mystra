@@ -6,7 +6,7 @@
 //
 // Surface syntax (paper-faithful):
 //   - Action keywords are lowercase: propagate, source, sink, inject,
-//     extract, set, clear, forward, collapse, preserve.
+//     extract, set, clear, preserve.
 //   - Rules have NO terminator. A rule body is a sequence of sub-rules,
 //     delimited purely by keyword disjointness: a sub-rule always begins
 //     with an action keyword, and a body ends at the next `rule` / `@engine`
@@ -64,11 +64,9 @@ module.exports = grammar({
 
     sub_rule: $ => choice(
       $.propagate_rule,
-      $.forward_rule,
       $.inject_rule,
       $.extract_rule,
       $.sink_rule,
-      $.collapse_rule,
       $.taint_source_rule,
       $.clear_rule,
       $.preserve_rule,
@@ -76,11 +74,9 @@ module.exports = grammar({
     ),
 
     propagate_rule: $ => seq('propagate', $.source_list, '->', $.sink_list, optional($.guard)),
-    forward_rule:   $ => seq('forward', $.source_list, '->', $.sink_list, optional($.guard)),
     inject_rule:    $ => seq('inject', $.source_list, '->', $.callback_sink, optional($.guard)),
     extract_rule:   $ => seq('extract', $.callback_source, '->', $.sink_list, optional($.guard)),
     sink_rule:      $ => seq('sink', $.source_list, $.alert_anno, optional($.guard)),
-    collapse_rule:  $ => seq('collapse', $.source_list, '->', $.sink_list, optional($.guard)),
     taint_source_rule: $ => seq('source', '->', $.sink_list, optional($.guard)),
     clear_rule:     $ => seq('clear', optional($.guard)),
     preserve_rule:  $ => seq('preserve', optional($.guard)),

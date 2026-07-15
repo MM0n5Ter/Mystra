@@ -4,8 +4,8 @@
 ["rule" "let"] @keyword
 
 ; Action keywords (lowercase, paper-faithful)
-["propagate" "forward" "inject" "extract" "sink"
- "collapse" "source" "clear" "preserve" "set"] @keyword.operator
+["propagate" "inject" "extract" "sink"
+ "source" "clear" "preserve" "set"] @keyword.operator
 
 ; Guard keywords
 ["where" "and" "or" "not" "in" "matches"] @keyword

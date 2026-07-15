@@ -16,11 +16,11 @@ namespace dynalysis {
 // =========================================================================
 enum class ActionType {
     kPropagate = 0,    // PROPAGATE: create new derived FlowNode (multi-parent merge)
-    kForward = 1,      // FORWARD: copy taint ID unchanged (single parent, cheaper)
+    // 1 = RESERVED (was kForward; merged into kPropagate — no on-wire byte 1 emitted)
     kClear = 2,        // CLEAR: block taint flow (set accumulator = 0)
     kSink = 3,    // SINK: pre-hook security alert with CWE classification
     kPreserve = 4,     // PRESERVE: NOP (keep accumulator taint through trampoline)
-    kCollapse = 5,     // COLLAPSE: merge container wildcard [*] into scalar
+    // 5 = RESERVED (was kCollapse; merged into kPropagate — no on-wire byte 5 emitted)
     kTaintSource = 6,  // TAINT_SOURCE: mark API output as taint origin
     kInject = 7,       // INJECT: bridge taint INTO HOF callback parameters
     kExtract = 8,      // EXTRACT: bridge taint FROM HOF callback return
@@ -391,12 +391,6 @@ private:
     static void ExecPropagate(IVmAdapter& vm, TaintEngine* engine,
                               const BuiltinRuleDescriptor& desc,
                               const SubRule& sr, const ExecutionContext& ctx);
-    static void ExecForward(IVmAdapter& vm, TaintEngine* engine,
-                            const BuiltinRuleDescriptor& desc,
-                            const SubRule& sr, const ExecutionContext& ctx);
-    static void ExecCollapse(IVmAdapter& vm, TaintEngine* engine,
-                             const BuiltinRuleDescriptor& desc,
-                             const SubRule& sr, const ExecutionContext& ctx);
     static void ExecTaintSource(IVmAdapter& vm, TaintEngine* engine,
                                 const BuiltinRuleDescriptor& desc,
                                 const SubRule& sr, const ExecutionContext& ctx);

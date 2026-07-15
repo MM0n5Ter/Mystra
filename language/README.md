@@ -43,8 +43,8 @@ rule V8_native::ObjectDefineProperty(tar, key, desc):
     sink desc @cwe(1321) where tar.is_proto   # guarded action
 ```
 
-**Actions** (all lowercase): `propagate` `forward` `inject` `extract` `sink`
-`collapse` `source` `clear` `preserve` `set`.
+**Actions** (all lowercase): `propagate` `inject` `extract` `sink`
+`source` `clear` `preserve` `set`.
 
 **Locators** address operands: `@self`, `@ret`, `@args[i]` / `@args[i:j]`, or a
 param name; with an optional path — `[*]`/`[**]` (element wildcards), `.*`/`.**`
