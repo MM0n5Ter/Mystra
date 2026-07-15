@@ -10,7 +10,7 @@ interpreter and the Maglev JIT, without deoptimizing back to the interpreter.
 It is built on **Node.js v24.13.1**. Adding support for a new vulnerability class
 requires only declarative Mystra rules (`language/v8-rules.tsl`) — no engine changes.
 
-> Reference: *Mystra: Declarative Dynamic Taint Analysis via Shadow Virtual Machine.*
+> Reference: [*Mystra: Declarative Dynamic Taint Analysis via Shadow Virtual Machine.*](https://arxiv.org/abs/2607.12308)
 
 ## Build
 
