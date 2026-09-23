@@ -216,8 +216,17 @@ async function test_vuln_simulation() {
 function test_edge_cases() {
   console.log("\n--- Edge cases ---");
 
-  // 26. Empty string tainted
-  check("clone empty tainted string", hasTaint(structuredClone(taint(""))));
+  // 26. Empty string: NOT taintable by design.
+  //
+  // "" is one canonical, immutable object shared by every empty string in the
+  // process, so it has no identity for taint to attach to and the taintability
+  // policy refuses heap writes to it (see CLAUDE.md, "Canonical singletons are
+  // NOT taintable"). A clone therefore cannot carry taint on an empty string.
+  // This assertion previously passed only because the write succeeded and
+  // contaminated the shared "" for the whole process — every later empty string
+  // read as tainted. Pinning the corrected behaviour here.
+  check("clone empty string carries no taint (singleton, by design)",
+        !hasTaint(structuredClone(taint(""))));
 
   // 27. Very long string
   const longStr = taint("x".repeat(10000), "LongStr");

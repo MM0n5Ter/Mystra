@@ -183,6 +183,24 @@ void TaintEngine::ResetEpoch() {
 // Shadow Heap (unchanged logic, but without RC calls)
 // =================================================================
 void TaintEngine::SetHeapTaint(uintptr_t obj_addr, uintptr_t field_addr, uint32_t id) {
+    // A canonical singleton (`true`, `false`, `null`, `undefined`, the empty
+    // string) is ONE immutable object shared by every occurrence of the value,
+    // so an entry keyed on its address marks the value tainted process-wide:
+    // one `JSON.parse("true")` would make every `true` in the program read as
+    // tainted, and any hooked call receiving `true` in any argument position
+    // would then raise that rule's alert. Refuse the write. Clearing (id == 0)
+    // is left alone — it only ever removes state.
+    if (id != 0 && !IsTaintableAddress(obj_addr)) {
+        refused_heap_writes_++;
+        static const bool dta_dbg_refuse = (getenv("DTA_DBG_GHT") != nullptr);
+        if (dta_dbg_refuse) {
+            fprintf(stderr,
+                    "[SETHEAP-REFUSED] obj=0x%lx key=0x%lx id=%u "
+                    "(value has no identity)\n",
+                    (unsigned long)obj_addr, (unsigned long)field_addr, id);
+        }
+        return;
+    }
     std::lock_guard<std::mutex> lock(shadow_heap_mutex_);
     shadow_heap_[obj_addr][field_addr] = id;
     static const bool dta_dbg_ght = (getenv("DTA_DBG_GHT") != nullptr);
@@ -235,6 +253,13 @@ void TaintEngine::CollectAllHeapTaints(uintptr_t obj_addr, std::vector<uint32_t>
 }
 
 void TaintEngine::CopyAllHeapTaints(uintptr_t from_addr, uintptr_t to_addr) {
+    // Same rule as SetHeapTaint: never land taint on a value with no identity
+    // (see SetTaintablePolicy). Checked before the lock — the policy is a host
+    // callback and must not run under it.
+    if (!IsTaintableAddress(to_addr)) {
+        refused_heap_writes_++;
+        return;
+    }
     std::lock_guard<std::mutex> lock(shadow_heap_mutex_);
     auto it = shadow_heap_.find(from_addr);
     if (it == shadow_heap_.end()) return;

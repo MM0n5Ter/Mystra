@@ -82,6 +82,41 @@ static Isolate* GetCurrentInternalIsolate() {
 // isolate's allocator range). Whether a derived string gets internalized into
 // RO/shared space is decided by V8's per-process random string-hash seed, so
 // that narrow check silently dropped taint on ~50% of process runs.
+// Values V8 canonicalises into a single shared object have no identity for taint
+// to attach to: `true`, `false`, `null`, `undefined`, the holes, the empty string
+// and canonical NaN are each ONE immutable object that every occurrence of the
+// value shares. Writing shadow state keyed on such an address marks the value
+// tainted for the whole process — one `JSON.parse("true")` makes every `true` in
+// the program read as tainted, and because the sink check inspects every
+// argument, any hooked call that then receives `true` anywhere in its argument
+// list raises that rule's alert. Refuse those addresses.
+//
+// Interned strings are deliberately NOT refused: a string owns its identity, and
+// the aliasing interning introduces is documented, intended behaviour.
+//
+// Address comparison only — this never dereferences obj_addr, so it is safe on a
+// bogus address and cheap enough for the shadow-heap write path. With static
+// read-only roots the compared values are compile-time constants.
+static bool DtaIsTaintableAddress(void* ctx, uintptr_t obj_addr) {
+  Isolate* isolate = static_cast<Isolate*>(ctx);
+  if (isolate == nullptr) return true;
+  constexpr uintptr_t kUntagMask = ~static_cast<uintptr_t>(kHeapObjectTagMask);
+  ReadOnlyRoots roots(isolate);
+  const uintptr_t kIdentityless[] = {
+      roots.true_value().ptr() & kUntagMask,
+      roots.false_value().ptr() & kUntagMask,
+      roots.null_value().ptr() & kUntagMask,
+      roots.undefined_value().ptr() & kUntagMask,
+      roots.the_hole_value().ptr() & kUntagMask,
+      roots.empty_string().ptr() & kUntagMask,
+      roots.nan_value().ptr() & kUntagMask,
+  };
+  for (uintptr_t identityless : kIdentityless) {
+    if (obj_addr == identityless) return false;
+  }
+  return true;
+}
+
 static bool DtaIsDereferenceableHeapObject(Isolate* isolate, Address tagged) {
     if ((tagged & kHeapObjectTagMask) != kHeapObjectTag) return false;
     if (isolate == nullptr) return false;
@@ -1437,8 +1472,31 @@ uint32_t TaintAdapter::CallApplyCallRuleTaint(Address result_addr) {
             frame.hof_acc + frame.hof_acc_count);
         std::sort(parents.begin(), parents.end());
         parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
-        // One flat CreateNode with all unique parents
-        uint32_t merged = engine->CreateNode("HOF-extract", parents);
+        // One flat CreateNode with all unique parents.
+        //
+        // Name the node with the HOF that produced it. Without this every such
+        // node is an anonymous "HOF-extract", so a high-fan-in node cannot be
+        // attributed to a rule and there is no way to tell whether the fan-in
+        // comes from a shape whose element mapping could be refined
+        // (Array.prototype.map) or from one where it could not (join, reduce,
+        // metadata iteration, a user function taking a callback). Mirrors the
+        // "[tbin-rule]" suffix the propagation nodes already carry.
+        std::string hof_label = "HOF-extract";
+        if (frame.category == dynalysis::TargetCategory::kHostApi &&
+            frame.target_signature[0] != '\0') {
+            hof_label += " [";
+            hof_label += frame.target_signature;
+            hof_label += "]";
+        } else if (frame.target_id >= 0) {
+            const char* bname = v8::internal::Builtins::name(
+                static_cast<v8::internal::Builtin>(frame.target_id));
+            if (bname != nullptr && bname[0] != '\0') {
+                hof_label += " [";
+                hof_label += bname;
+                hof_label += "]";
+            }
+        }
+        uint32_t merged = engine->CreateNode(hof_label, parents);
         engine->SetHeapTaint(ret_untag, dynalysis::ELEM_SHALLOW_KEY, merged);
         if (result_taint == 0) result_taint = merged;
       }
@@ -2202,6 +2260,10 @@ void TaintAdapter::EagerInitializeForIsolate(Isolate* isolate) {
           static_cast<Isolate*>(ctx)->dta_set_any_taint_live();
         },
         isolate);
+    // Refuse shadow state on values that have no identity to attach it to —
+    // the canonical `true`/`false`/`null`/`undefined`/""/NaN objects. See
+    // DtaIsTaintableAddress.
+    isolate->taint_engine()->SetTaintablePolicy(&DtaIsTaintableAddress, isolate);
   }
 
   // Always-On mode: when --dta-maglev is active, enable tracking from the

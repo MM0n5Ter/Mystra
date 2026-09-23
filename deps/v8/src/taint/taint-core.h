@@ -163,6 +163,27 @@ public:
         taint_live_context_ = ctx;
     }
 
+    // Taintability policy — set by the runtime adapter at init time. The core
+    // keys shadow state by raw address and cannot tell whether an address
+    // denotes a value that owns its identity. A runtime may canonicalise some
+    // values into a single immutable object shared by every occurrence of that
+    // value (in V8: `true`, `false`, `null`, `undefined`, the holes, the empty
+    // string). An entry keyed on such an address does not taint *a* value, it
+    // taints the value everywhere in the process, so the host refuses those
+    // addresses here. Returns true when the address may carry taint; unset
+    // means every address may (the default, so other runtimes are unaffected).
+    using TaintableAddressFn = bool(*)(void* context, uintptr_t obj_addr);
+    void SetTaintablePolicy(TaintableAddressFn fn, void* ctx) {
+        taintable_policy_ = fn;
+        taintable_context_ = ctx;
+    }
+    bool IsTaintableAddress(uintptr_t obj_addr) const {
+        return taintable_policy_ == nullptr ||
+               taintable_policy_(taintable_context_, obj_addr);
+    }
+    // Shadow-heap writes the policy refused, for diagnostics.
+    uint64_t refused_heap_writes() const { return refused_heap_writes_; }
+
     // ---------------------------------------------------------
     // 1. Flow graph construction (append-only, no reference counting)
     // ---------------------------------------------------------
@@ -318,6 +339,10 @@ private:
     // safe to call on every mint without a separate "first time" guard.
     TaintLiveCallbackFn taint_live_callback_ = nullptr;
     void* taint_live_context_ = nullptr;
+    // Taintability policy (see SetTaintablePolicy).
+    TaintableAddressFn taintable_policy_ = nullptr;
+    void* taintable_context_ = nullptr;
+    uint64_t refused_heap_writes_ = 0;
     // Monotonic core-side mirror of "any taint ever minted". While false the
     // shadow arena is provably all-zero (calloc'd, never written), so frame
     // pushes can skip the per-entry zeroing memset.

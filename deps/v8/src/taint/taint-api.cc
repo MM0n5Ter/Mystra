@@ -19,10 +19,28 @@ void SetTaint(Isolate* isolate, Local<Value> value, const char* source_name) {
   i_isolate->taint_engine()->SetAccumulatorTaint(real_id);
 
   if (!i::IsSmi(*internal_obj)) {
-      i::taint::TaintAdapter::RegisterWeakHandleIfNecessary(i_isolate, (*internal_obj).ptr());
-      
-      constexpr uintptr_t WILDCARD_KEY = 0xFFFFFFFFFFFFFFFF;
-      i_isolate->taint_engine()->SetHeapTaint(UNTAG((*internal_obj).ptr()), WILDCARD_KEY, real_id);
+      uintptr_t obj_addr = UNTAG((*internal_obj).ptr());
+      if (!i_isolate->taint_engine()->IsTaintableAddress(obj_addr)) {
+          // `true`/`false`/`null`/`undefined`/""/NaN are one shared object each,
+          // so there is no per-value identity to mark, and storing heap taint
+          // would taint that value process-wide. The accumulator taint set above
+          // still carries through the current expression. Say so once rather
+          // than dropping it silently.
+          static bool warned = false;
+          if (!warned) {
+              warned = true;
+              fprintf(stderr,
+                      "[DTA-WARN] SetTaint on a value with no identity "
+                      "(true/false/null/undefined/\"\"/NaN): register taint "
+                      "applies to this expression, but no heap taint is stored "
+                      "— every occurrence of that value is the same object.\n");
+          }
+      } else {
+          i::taint::TaintAdapter::RegisterWeakHandleIfNecessary(i_isolate, (*internal_obj).ptr());
+
+          constexpr uintptr_t WILDCARD_KEY = 0xFFFFFFFFFFFFFFFF;
+          i_isolate->taint_engine()->SetHeapTaint(obj_addr, WILDCARD_KEY, real_id);
+      }
   }
 }
 
